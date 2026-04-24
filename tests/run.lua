@@ -1,8 +1,8 @@
 package.path = table.concat({
     './lua/?.lua',
     './lua/?/init.lua',
-    '/home/griwes/projects/statuesque.nvim/lua/?.lua',
-    '/home/griwes/projects/statuesque.nvim/lua/?/init.lua',
+    '../statuesque.nvim/lua/?.lua',
+    '../statuesque.nvim/lua/?/init.lua',
     package.path,
 }, ';')
 
@@ -27,6 +27,7 @@ end
 dofile('tests/tabulature_model_spec.lua')
 dofile('tests/manifold_capability_spec.lua')
 dofile('tests/prototype_state_spec.lua')
+dofile('tests/tabline_spec.lua')
 
 if failures > 0 then
     error(('%d tabulature test(s) failed'):format(failures))

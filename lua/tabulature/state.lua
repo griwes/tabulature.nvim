@@ -88,6 +88,12 @@ local function active_path(root)
     return ids
 end
 
+---@param root? table
+---@return table[]
+function M.active_path(root)
+    return active_path(root or M.to_tree(manifold_sync.opts))
+end
+
 local function emit_change()
     if not manifold_sync.enabled then
         return
@@ -166,6 +172,16 @@ end
 function M.disable_manifold_sync()
     manifold_sync.enabled = false
     manifold_sync.opts = {}
+end
+
+---@param opts? table
+---@return integer
+function M.publish_manifold(opts)
+    opts = vim.tbl_extend('force', vim.deepcopy(manifold_sync.opts or {}), opts or {})
+    local tree = M.to_tree(opts)
+    return require('tabulature.manifold').publish_tree(tree, {
+        active_path = active_path(tree),
+    })
 end
 
 function M.is_within_path(_, _)

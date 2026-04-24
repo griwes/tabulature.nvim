@@ -5,6 +5,19 @@ local function assert_equal(actual, expected)
     assert(actual == expected, ('expected %q, got %q'):format(tostring(expected), tostring(actual)))
 end
 
+local function find_node(root, id)
+    if root.id == id then
+        return root
+    end
+    for _, child in ipairs(root.children or {}) do
+        local found = find_node(child, id)
+        if found ~= nil then
+            return found
+        end
+    end
+    return nil
+end
+
 describe('tabulature manifold capability', function()
     it('exposes a versioned Manifold capability record', function()
         local capabilities = manifold.capabilities()
@@ -173,5 +186,73 @@ describe('tabulature manifold capability', function()
         assert_equal(#published, 1)
         assert_equal(#published[1].root.children, 2)
         assert_equal(published[1].root.children[2].label, 'Second Tab')
+    end)
+
+    it('sets up child-side Manifold sync and creates nested tabs through plugin APIs', function()
+        local tabulature = require('tabulature')
+        local original_sockconnect = vim.fn.sockconnect
+        local original_rpcnotify = vim.fn.rpcnotify
+        local published = {}
+
+        vim.g.manifold_child_control = {
+            attachments = {
+                ['manifold:child:1'] = {
+                    host_server = '/tmp/manifold.sock',
+                },
+            },
+        }
+        vim.fn.sockconnect = function()
+            return 42
+        end
+        vim.fn.rpcnotify = function(_, _, _, args)
+            published[#published + 1] = args[2]
+            return true
+        end
+
+        tabulature.setup({ commands = false })
+        tabulature.create_tab({ id = 'top', label = 'Top' })
+        tabulature.create_subtab({ id = 'sub', label = 'Sub' })
+        tabulature.create_nested({ label = 'Deep', depth = 2 })
+
+        local did_publish = vim.wait(1000, function()
+            local latest = published[#published]
+            return latest ~= nil and find_node(latest.root, 'top') ~= nil and find_node(latest.root, 'sub') ~= nil
+        end, 10)
+        local final = published[#published]
+
+        require('tabulature.state').disable_manifold_sync()
+        vim.fn.sockconnect = original_sockconnect
+        vim.fn.rpcnotify = original_rpcnotify
+        vim.g.manifold_child_control = nil
+
+        assert(did_publish)
+        assert_equal(final.kind, 'tabulature.tree_update')
+        assert_equal(final.root.id, 'tabulature-child-root')
+        assert_equal(final.root.label, 'Child tabs')
+        assert_equal(find_node(final.root, 'top').label, 'Top')
+        assert_equal(find_node(final.root, 'sub').label, 'Sub')
+        assert_equal(final.active_path[#final.active_path], find_node(final.root, 'sub').children[1].children[1].id)
+    end)
+
+    it('auto-detects a Manifold host and installs the host provider without explicit host mode', function()
+        local tabulature = require('tabulature')
+        local installed = false
+        package.loaded['manifold'] = {
+            is_host = function()
+                return true
+            end,
+            install_tabulature_provider = function(opts)
+                installed = true
+                return opts.surface == 'tabline' and opts.install == true
+            end,
+        }
+
+        tabulature.setup({
+            commands = false,
+        })
+
+        package.loaded['manifold'] = nil
+
+        assert(installed)
     end)
 end)

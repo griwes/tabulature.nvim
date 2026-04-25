@@ -20,6 +20,7 @@ end
 
 local current_tab = root_id
 local parent_id_to_use = nil
+local name_to_use = nil
 local manifold_sync = {
     enabled = false,
     opts = {},
@@ -216,23 +217,15 @@ vim.api.nvim_create_autocmd('TabEnter', {
         local id = vim.api.nvim_get_current_tabpage()
 
         if tabs[id] == nil then
-            M.add_tab(tostring(id), id, parent_id_to_use or M.get_current_tab().parent)
+            M.add_tab(name_to_use or tostring(id), id, parent_id_to_use or M.get_current_tab().parent)
         end
-
-        M.update_switch_targets(id)
-        id = M.compute_switch_target(id)
 
         current_tab_list = vim.api.nvim_list_tabpages()
-        if id == vim.api.nvim_get_current_tabpage() then
-            M.set_current_tab(id)
-            parent_id_to_use = nil
-            vim.cmd([[ redrawtabline ]])
-        else
-            vim.schedule(function()
-                vim.notify('set tabpage')
-                vim.api.nvim_set_current_tabpage(id)
-            end)
-        end
+        M.update_switch_targets(id)
+        M.set_current_tab(id)
+        parent_id_to_use = nil
+        name_to_use = nil
+        vim.cmd([[ redrawtabline ]])
     end,
 })
 vim.api.nvim_create_autocmd('TabClosed', {
@@ -266,9 +259,11 @@ vim.api.nvim_create_autocmd('TabClosed', {
     end,
 })
 
-function M.create_child(parent_id)
+function M.create_child(parent_id, name)
     parent_id_to_use = parent_id or current_tab
+    name_to_use = name
     vim.cmd([[ tabnew ]])
+    return vim.api.nvim_get_current_tabpage()
 end
 
 function M.compute_switch_target(tab_id)

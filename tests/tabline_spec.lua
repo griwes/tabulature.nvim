@@ -24,6 +24,7 @@ describe('tabulature tabline adapter', function()
 
         assert(vim.o.tabline == '%!v:lua.tabulature_tabline()')
         assert(vim.o.showtabline == 2)
+        assert(vim.api.nvim_get_hl(0, { name = 'TabulatureActive1' }).bg ~= nil)
 
         vim.o.tabline = original_tabline
         vim.o.showtabline = original_showtabline

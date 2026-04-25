@@ -1,10 +1,5 @@
 local M = {}
 
-local function next_id(prefix)
-    local manifold = require('tabulature.manifold')
-    return manifold._next_id(prefix)
-end
-
 local function option_label(opts, fallback)
     return require('tabulature.manifold')._option_label(opts, fallback)
 end
@@ -25,10 +20,20 @@ local function install_commands()
     end, { nargs = '?' })
 end
 
+local function setup_theme(opts)
+    if opts.theme == false then
+        return
+    end
+
+    local theme_opts = type(opts.theme) == 'table' and opts.theme or {}
+    require('tabulature.themes.lualine').setup(theme_opts)
+end
+
 --- Configure optional Tabulature UI surfaces and integrations.
---- @param opts? { tabline?: boolean|table, manifold?: boolean|table, commands?: boolean }
+--- @param opts? { tabline?: boolean|table, manifold?: boolean|table, commands?: boolean, theme?: boolean|table }
 function M.setup(opts)
     opts = opts or {}
+    setup_theme(opts)
     if opts.tabline then
         local tabline_opts = type(opts.tabline) == 'table' and opts.tabline or {}
         require('tabulature.tabline').setup(tabline_opts)
@@ -42,37 +47,29 @@ function M.setup(opts)
     end
 end
 
---- Create a top-level tab in Tabulature's hierarchy.
---- @param opts? string|{ label?: string, id?: any }
---- @return any
+--- Create a top-level Neovim tab in Tabulature's hierarchy.
+--- @param opts? string|{ label?: string }
+--- @return integer tabpage
 function M.create_tab(opts)
     opts = opts or {}
-    local id = type(opts) == 'table' and opts.id or nil
-    id = id or next_id('tabulature-tab')
     local state = require('tabulature.state')
-    state.add_tab(option_label(opts, 'Tab ' .. tostring(id)), id)
-    state.set_current_tab(id)
-    return id
+    return state.create_child(state.get_root_id(), option_label(opts))
 end
 
---- Create a subtab below the current Tabulature tab.
---- @param opts? string|{ label?: string, id?: any, parent_id?: any }
---- @return any
+--- Create a Neovim tab nested below the current Tabulature tab.
+--- @param opts? string|{ label?: string, parent_id?: any }
+--- @return integer tabpage
 function M.create_subtab(opts)
     opts = opts or {}
-    local id = type(opts) == 'table' and opts.id or nil
-    id = id or next_id('tabulature-subtab')
     local parent_id = type(opts) == 'table' and opts.parent_id or nil
     local state = require('tabulature.state')
     parent_id = parent_id or state.get_current_tab().id
-    state.add_tab(option_label(opts, 'Subtab ' .. tostring(id)), id, parent_id)
-    state.set_current_tab(id)
-    return id
+    return state.create_child(parent_id, option_label(opts))
 end
 
---- Create a deeper nested chain below the current Tabulature tab.
+--- Create a chain of real Neovim tabs below the current Tabulature tab.
 --- @param opts? string|{ label?: string, depth?: integer }
---- @return any[]
+--- @return integer[] tabpages
 function M.create_nested(opts)
     opts = opts or {}
     local depth = type(opts) == 'table' and tonumber(opts.depth) or nil
@@ -82,12 +79,10 @@ function M.create_nested(opts)
     local parent_id = state.get_current_tab().id
     local ids = {}
     for index = 1, depth do
-        local id = next_id('tabulature-deep')
+        local id = state.create_child(parent_id, string.format('%s %d', label, index))
         ids[#ids + 1] = id
-        state.add_tab(string.format('%s %d', label, index), id, parent_id)
         parent_id = id
     end
-    state.set_current_tab(parent_id)
     return ids
 end
 

@@ -210,13 +210,13 @@ describe('tabulature manifold capability', function()
         end
 
         tabulature.setup({ commands = false })
-        tabulature.create_tab({ id = 'top', label = 'Top' })
-        tabulature.create_subtab({ id = 'sub', label = 'Sub' })
+        local top = tabulature.create_tab({ label = 'Top' })
+        local sub = tabulature.create_subtab({ label = 'Sub' })
         tabulature.create_nested({ label = 'Deep', depth = 2 })
 
         local did_publish = vim.wait(1000, function()
             local latest = published[#published]
-            return latest ~= nil and find_node(latest.root, 'top') ~= nil and find_node(latest.root, 'sub') ~= nil
+            return latest ~= nil and find_node(latest.root, top) ~= nil and find_node(latest.root, sub) ~= nil
         end, 10)
         local final = published[#published]
 
@@ -229,9 +229,9 @@ describe('tabulature manifold capability', function()
         assert_equal(final.kind, 'tabulature.tree_update')
         assert_equal(final.root.id, 'tabulature-child-root')
         assert_equal(final.root.label, 'Child tabs')
-        assert_equal(find_node(final.root, 'top').label, 'Top')
-        assert_equal(find_node(final.root, 'sub').label, 'Sub')
-        assert_equal(final.active_path[#final.active_path], find_node(final.root, 'sub').children[1].children[1].id)
+        assert_equal(find_node(final.root, top).label, 'Top')
+        assert_equal(find_node(final.root, sub).label, 'Sub')
+        assert_equal(final.active_path[#final.active_path], find_node(final.root, sub).children[1].children[1].id)
     end)
 
     it('auto-detects a Manifold host and installs the host provider without explicit host mode', function()

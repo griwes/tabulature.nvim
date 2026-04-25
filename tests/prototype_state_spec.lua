@@ -1,10 +1,104 @@
 local state = require('tabulature.state')
+local model = require('tabulature.model')
 
 local function assert_equal(actual, expected)
     assert(actual == expected, ('expected %q, got %q'):format(tostring(expected), tostring(actual)))
 end
 
 describe('tabulature prototype state integration', function()
+    it('creates real Neovim tabpages through Tabulature commands', function()
+        require('tabulature').setup({ commands = true, manifold = false })
+        local before = #vim.api.nvim_list_tabpages()
+
+        vim.cmd('TabulatureNewTab CommandTop')
+        local top = vim.api.nvim_get_current_tabpage()
+        vim.cmd('TabulatureNewSubtab CommandSub')
+        local sub = vim.api.nvim_get_current_tabpage()
+        vim.cmd('TabulatureNewNested CommandDeep')
+        local final_nested = vim.api.nvim_get_current_tabpage()
+
+        assert_equal(#vim.api.nvim_list_tabpages(), before + 4)
+        assert_equal(state.get_tab(top).name, 'CommandTop')
+        assert_equal(state.get_tab(sub).name, 'CommandSub')
+        assert_equal(state.get_tab(sub).parent, top)
+        assert_equal(state.get_tab(final_nested).name, 'CommandDeep 2')
+    end)
+
+    it('creates real Neovim tabpages through the public API', function()
+        local tabulature = require('tabulature')
+        local before = #vim.api.nvim_list_tabpages()
+
+        local top = tabulature.create_tab({ label = 'Real Top' })
+        local sub = tabulature.create_subtab({ label = 'Real Sub' })
+        local nested = tabulature.create_nested({ label = 'Real Deep', depth = 2 })
+
+        assert_equal(type(top), 'number')
+        assert_equal(type(sub), 'number')
+        assert_equal(type(nested[1]), 'number')
+        assert_equal(#vim.api.nvim_list_tabpages(), before + 4)
+
+        local tree = state.to_tree()
+        assert_equal(state.get_tab(top).name, 'Real Top')
+        assert_equal(state.get_tab(sub).name, 'Real Sub')
+        assert_equal(state.get_tab(nested[2]).name, 'Real Deep 2')
+        assert_equal(state.get_tab(sub).parent, top)
+        assert_equal(state.get_tab(nested[1]).parent, sub)
+        assert_equal(model.find(tree, nested[2]).active, true)
+    end)
+
+    it('does not redirect physical tabnext or tabprevious through nested switch targets', function()
+        local tabulature = require('tabulature')
+        local top = tabulature.create_tab({ label = 'Nav Top' })
+        local sub = tabulature.create_subtab({ label = 'Nav Sub' })
+
+        vim.api.nvim_set_current_tabpage(sub)
+        vim.cmd.tabprevious()
+        assert_equal(vim.api.nvim_get_current_tabpage(), top)
+
+        vim.cmd.tabnext()
+        assert_equal(vim.api.nvim_get_current_tabpage(), sub)
+    end)
+
+    it('dispatches Statuesque-rendered local tab clicks and close buttons', function()
+        local tabulature = require('tabulature')
+        local clicks = require('statuesque.clicks')
+        local target = tabulature.create_tab({ label = 'Clickable Tab' })
+        local origin = vim.api.nvim_list_tabpages()[1]
+        vim.api.nvim_set_current_tabpage(origin)
+
+        local rendered = require('statuesque').render(require('statuesque.widgets').tabulature()(), 'tabline')
+        assert(rendered:find('@v:lua.__statuesque_click@', 1, true), rendered)
+        assert(rendered:find('', 1, true), rendered)
+
+        local switch_click
+        local close_click
+        for id, record in pairs(clicks._handlers) do
+            local node = record.context and record.context.node
+            if node ~= nil and node.role == 'tab-body' and node.children ~= nil then
+                for _, child in ipairs(node.children) do
+                    if child.text == 'Clickable Tab' then
+                        switch_click = id
+                    end
+                end
+            end
+        end
+
+        assert(switch_click ~= nil, 'missing switch click handler')
+        for id, record in pairs(clicks._handlers) do
+            local node = record.context and record.context.node
+            if node ~= nil and node.role == 'tab-close' and id > switch_click then
+                close_click = close_click == nil and id or math.min(close_click, id)
+            end
+        end
+
+        clicks.dispatch(switch_click)
+        assert_equal(vim.api.nvim_get_current_tabpage(), target)
+
+        assert(close_click ~= nil, 'missing close click handler')
+        clicks.dispatch(close_click)
+        assert_equal(vim.api.nvim_tabpage_is_valid(target), false)
+    end)
+
     it('exports prototype tab state as a shared model tree', function()
         local tab_id = 'suite-tab'
         state.add_tab('Suite Tab', tab_id)

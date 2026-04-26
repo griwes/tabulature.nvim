@@ -13,8 +13,8 @@ local DEFAULTS = {
     leading_padding = ' ',
     tab_gap_text = ' ',
     nested_separator_text = ' 󰇘 ',
-    leading_separator_text = '',
-    trailing_separator_text = '',
+    leading_separator_text = '',
+    trailing_separator_text = '',
     close_text = '  ',
 }
 

@@ -1,4 +1,5 @@
 local M = {}
+local style_subscription = nil
 
 local function option_label(opts, fallback)
     return require('tabulature.manifold')._option_label(opts, fallback)
@@ -29,15 +30,33 @@ local function setup_theme(opts)
     require('tabulature.themes.lualine').setup(theme_opts)
 end
 
---- Configure optional Tabulature UI surfaces and integrations.
---- @param opts? { tabline?: boolean|table, manifold?: boolean|table, commands?: boolean, theme?: boolean|table }
+local function subscribe_to_statuesque_style()
+    if style_subscription ~= nil then
+        return
+    end
+
+    local ok, statuesque = pcall(require, 'statuesque')
+    if not ok or type(statuesque.on_style_change) ~= 'function' then
+        return
+    end
+
+    style_subscription = statuesque.on_style_change(function()
+        pcall(vim.cmd, 'redrawtabline')
+        pcall(vim.cmd, 'redrawstatus')
+    end)
+end
+
+--- Configure optional Tabulature integrations.
+--- Tabline rendering is owned by Statuesque; Tabulature only provides the
+--- `statuesque.widgets.tabulature()` component consumed by that surface.
+--- @param opts? { manifold?: boolean|table, commands?: boolean, theme?: boolean|table, style?: 'inherit'|'slanted'|'capsule'|string }
 function M.setup(opts)
     opts = opts or {}
+    require('tabulature.config').configure({
+        style = opts.style,
+    })
+    subscribe_to_statuesque_style()
     setup_theme(opts)
-    if opts.tabline then
-        local tabline_opts = type(opts.tabline) == 'table' and opts.tabline or {}
-        require('tabulature.tabline').setup(tabline_opts)
-    end
     if opts.commands ~= false then
         install_commands()
     end

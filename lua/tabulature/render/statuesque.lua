@@ -14,22 +14,25 @@ local DEFAULTS = {
     separator_hl_prefix = 'TabulatureSeparator',
     fill_hl = 'Tabulature0',
     active_marker_text = ' ',
-    child_separator_text = ' ::: ',
+    child_separator_text = ' :: ',
     close_text = ' ',
+    create_text = '󰐕',
     dirty_text = '*',
     fold_text = '',
+    inactive_tab_icon_text = '󰓪',
     leading_padding = ' ',
     level_separator_text = ' :: ',
     pinned_text = '!',
     tab_gap_text = ' ',
     tab_icon_text = '󰓩',
+    tab_inner_padding = ' ',
     tab_left_cap_text = '',
     tab_right_cap_text = '',
 }
 
 local STYLE_DEFAULTS = {
     capsule = {
-        child_separator_text = ' ::: ',
+        child_separator_text = ' :: ',
         fold_text = '',
         level_separator_text = ' :: ',
         tab_gap_text = ' ',
@@ -37,10 +40,11 @@ local STYLE_DEFAULTS = {
         tab_right_cap_text = '',
     },
     slanted = {
-        child_separator_text = '  ',
+        child_separator_text = '',
+        create_text = ' 󰐕 ',
         fold_text = '  ',
         leading_padding = '',
-        level_separator_text = '  ',
+        level_separator_text = '',
         tab_gap_text = '',
         tab_left_cap_text = '',
         tab_right_cap_text = '',
@@ -118,6 +122,12 @@ local function level_for(depth)
     return depth % size + 1
 end
 
+--- @param depth integer
+--- @return integer
+local function predecessor_level_for(depth)
+    return level_for(math.max(depth - 1, 0))
+end
+
 --- @param node table
 --- @param opts? table
 --- @return integer?
@@ -153,10 +163,14 @@ local function marker(node, opts)
     return text
 end
 
+--- @param selected boolean
 --- @param opts? table
 --- @return string
-local function icon_for(opts)
-    return option(opts, 'tab_icon_text')
+local function icon_for(selected, opts)
+    if selected then
+        return option(opts, 'tab_icon_text')
+    end
+    return option(opts, 'inactive_tab_icon_text')
 end
 
 --- @param node table
@@ -166,8 +180,8 @@ local function click_action(node, opts)
     local handle = tab_handle(node, opts)
     if handle ~= nil then
         return function()
-            if type(_G.tabulature_switch_tab_direct) == 'function' then
-                return _G.tabulature_switch_tab_direct(handle)
+            if type(_G.tabulature_switch_tab) == 'function' then
+                return _G.tabulature_switch_tab(handle)
             end
             if vim and vim.api and vim.api.nvim_tabpage_is_valid(handle) then
                 return vim.api.nvim_set_current_tabpage(handle)
@@ -207,6 +221,68 @@ local function close_action(node, opts)
         local tabnr = vim.api.nvim_tabpage_get_number(handle)
         return pcall(vim.cmd, tostring(tabnr) .. 'tabclose')
     end
+end
+
+--- @param parent table?
+--- @param opts? table
+--- @return function|table
+local function create_child_action(parent, opts)
+    if opts and opts.local_actions then
+        return function()
+            local ok, state = pcall(require, 'tabulature.state')
+            if not ok or type(state) ~= 'table' or type(state.create_child) ~= 'function' then
+                return nil
+            end
+
+            local parent_id
+            if parent == nil or parent.kind == 'workspace' then
+                parent_id = type(state.get_root_id) == 'function' and state.get_root_id() or nil
+            elseif type(parent.tab_handle) == 'number' then
+                parent_id = parent.tab_handle
+            elseif type(parent.id) == 'number' then
+                parent_id = parent.id
+            end
+
+            if parent_id == nil then
+                return nil
+            end
+
+            return state.create_child(parent_id)
+        end
+    end
+
+    local action = opts and opts.create_action or 'tabulature.create_child'
+    return {
+        id = action,
+        args = {
+            parent_id = parent and parent.id or nil,
+            parent_kind = parent and parent.kind or nil,
+            parent_source = parent and parent.source or nil,
+            parent_tab_handle = parent and parent.tab_handle or nil,
+        },
+    }
+end
+
+--- @param level integer
+--- @param opts? table
+--- @return function|table
+local function fold_level_action(level, opts)
+    if opts and opts.local_actions then
+        return function()
+            if type(_G.tabulature_fold_level) == 'function' then
+                return _G.tabulature_fold_level(level)
+            end
+            return nil
+        end
+    end
+
+    local action = opts and opts.fold_action or 'tabulature.fold_level'
+    return {
+        id = action,
+        args = {
+            level = level,
+        },
+    }
 end
 
 --- @param text string
@@ -290,21 +366,55 @@ end
 --- @param level integer
 --- @param opts? table
 local function append_fold_chip(spec, level, opts)
-    spec[#spec + 1] = text_node(option(opts, 'tab_left_cap_text'), fold_solid_hl(level, opts), 'level-fold-left')
-    spec[#spec + 1] = text_node(option(opts, 'fold_text'), fold_hl(level, opts), 'level-fold')
+    local action = fold_level_action(level, opts)
     spec[#spec + 1] =
-        text_node(option(opts, 'tab_right_cap_text'), fold_level_solid_hl(level, opts), 'level-fold-right')
+        text_node(option(opts, 'tab_left_cap_text'), fold_solid_hl(level, opts), 'level-fold-left', action)
+    spec[#spec + 1] = text_node(option(opts, 'fold_text'), fold_hl(level, opts), 'level-fold', action)
+    spec[#spec + 1] =
+        text_node(option(opts, 'tab_right_cap_text'), fold_level_solid_hl(level, opts), 'level-fold-right', action)
     spec[#spec + 1] = text_node(option(opts, 'tab_gap_text'), level_hl(level, opts), 'tab-gap')
+end
+
+--- @param spec table[]
+--- @param parent table?
+--- @param level integer
+--- @param has_tabs boolean
+--- @param opts? table
+local function append_create_chip(spec, parent, level, has_tabs, opts)
+    if opts and opts.create_controls == false then
+        return
+    end
+
+    local gap_text = has_tabs and option(opts, 'tab_gap_text') or ''
+    if gap_text ~= '' then
+        spec[#spec + 1] = text_node(gap_text, level_hl(level, opts), 'level-create-gap')
+    end
+    local left_hl = has_tabs and fold_level_solid_hl(level, opts) or fold_solid_hl(level, opts)
+    local action = create_child_action(parent, opts)
+    spec[#spec + 1] = text_node(option(opts, 'tab_left_cap_text'), left_hl, 'level-create-left', action)
+    spec[#spec + 1] = text_node(option(opts, 'create_text'), fold_hl(level, opts), 'level-create', action)
+    spec[#spec + 1] =
+        text_node(option(opts, 'tab_right_cap_text'), fold_solid_hl(level, opts), 'level-create-right', action)
 end
 
 --- @param node table
 --- @param depth integer
---- @param active boolean
+--- @param selected boolean
+--- @param current boolean
 --- @param opts? table
+--- @param close? function
 --- @return table[]
-local function tab_body_children(node, depth, active, opts)
+local function tab_body_children(node, depth, selected, current, opts, close)
     local children = {}
-    if active then
+    local padding = option(opts, 'tab_inner_padding')
+    if padding ~= '' then
+        children[#children + 1] = {
+            text = padding,
+            role = 'tab-padding-left',
+        }
+    end
+
+    if current then
         children[#children + 1] = {
             text = option(opts, 'active_marker_text'),
             role = 'tab-current-marker',
@@ -312,7 +422,7 @@ local function tab_body_children(node, depth, active, opts)
     end
 
     children[#children + 1] = {
-        text = icon_for(opts) .. ' ',
+        text = icon_for(selected, opts) .. ' ',
         role = 'tab-icon',
     }
 
@@ -330,24 +440,6 @@ local function tab_body_children(node, depth, active, opts)
         truncate = node.render_meta and node.render_meta.truncate or 'right',
     }
 
-    return children
-end
-
---- @param node table
---- @param depth integer
---- @param active boolean
---- @param opts? table
---- @return table[]
-local function tab_contents(node, depth, active, opts)
-    local children = {
-        {
-            role = 'tab-body',
-            on_click = click_action(node, opts),
-            children = tab_body_children(node, depth, active, opts),
-        },
-    }
-
-    local close = close_action(node, opts)
     if close ~= nil then
         children[#children + 1] = {
             text = option(opts, 'close_text'),
@@ -356,21 +448,48 @@ local function tab_contents(node, depth, active, opts)
         }
     end
 
+    if padding ~= '' then
+        children[#children + 1] = {
+            text = padding,
+            role = 'tab-padding-right',
+        }
+    end
+
+    return children
+end
+
+--- @param node table
+--- @param depth integer
+--- @param selected boolean
+--- @param current boolean
+--- @param opts? table
+--- @return table[]
+local function tab_contents(node, depth, selected, current, opts)
+    local close = close_action(node, opts)
+    local children = {
+        {
+            role = 'tab-body',
+            on_click = click_action(node, opts),
+            children = tab_body_children(node, depth, selected, current, opts, close),
+        },
+    }
+
     return children
 end
 
 --- @param spec table[]
 --- @param node table
 --- @param depth integer
---- @param active boolean
+--- @param selected boolean
+--- @param current boolean
 --- @param left_on_fill boolean
 --- @param right_on_fill boolean
 --- @param opts? table
-local function append_tab(spec, node, depth, active, left_on_fill, right_on_fill, opts)
+local function append_tab(spec, node, depth, selected, current, left_on_fill, right_on_fill, opts)
     local level = level_for(depth)
-    local current_body_hl = body_hl(active, level, opts)
-    local left_solid_hl = left_on_fill and solid_hl(active, level, opts) or level_solid_hl(active, level, opts)
-    local right_solid_hl = right_on_fill and solid_hl(active, level, opts) or level_solid_hl(active, level, opts)
+    local current_body_hl = body_hl(selected, level, opts)
+    local left_solid_hl = left_on_fill and solid_hl(selected, level, opts) or level_solid_hl(selected, level, opts)
+    local right_solid_hl = right_on_fill and solid_hl(selected, level, opts) or level_solid_hl(selected, level, opts)
 
     spec[#spec + 1] = text_node(option(opts, 'tab_left_cap_text'), left_solid_hl, 'tab-leading-separator')
     spec[#spec + 1] = {
@@ -383,7 +502,7 @@ local function append_tab(spec, node, depth, active, left_on_fill, right_on_fill
             source = node.source,
             tabulature = 'tab',
         },
-        children = tab_contents(node, depth, active, opts),
+        children = tab_contents(node, depth, selected, current, opts),
     }
     spec[#spec + 1] = text_node(option(opts, 'tab_right_cap_text'), right_solid_hl, 'tab-trailing-separator')
 end
@@ -410,6 +529,28 @@ local function find_active_node(root)
     end
 
     return nil
+end
+
+--- @param root table
+--- @return table?
+local function find_selected_node(root)
+    local node = root
+    local seen = {}
+    while node ~= nil and node.selected_child ~= nil and not seen[node.id] do
+        seen[node.id] = true
+        local selected = nil
+        for _, child in ipairs(node.children or {}) do
+            if child.id == node.selected_child then
+                selected = child
+                break
+            end
+        end
+        if selected == nil then
+            break
+        end
+        node = selected
+    end
+    return node
 end
 
 --- @param root table
@@ -460,9 +601,10 @@ end
 --- @param nodes table[]
 --- @param depth integer
 --- @param active_id any
+--- @param current_id any
 --- @param starts_on_level boolean
 --- @param opts? table
-local function append_tab_run(spec, nodes, depth, active_id, starts_on_level, opts)
+local function append_tab_run(spec, nodes, depth, active_id, current_id, starts_on_level, opts)
     local level = level_for(depth)
     local count = #(nodes or {})
     for index, node in ipairs(nodes or {}) do
@@ -474,34 +616,49 @@ local function append_tab_run(spec, nodes, depth, active_id, starts_on_level, op
             node,
             depth,
             node_is_active(node, active_id),
+            node_is_active(node, current_id),
             index == 1 and not starts_on_level,
             index == count,
             opts
         )
     end
+    append_create_chip(spec, opts and opts.create_parent, level, count > 0, opts)
 end
 
 --- @param spec table[]
 --- @param parent table
 --- @param path table[]
 --- @param depth integer
+--- @param current_id any
 --- @param has_previous_level boolean
 --- @param opts? table
-local function append_path_level(spec, parent, path, depth, has_previous_level, opts)
+local function append_path_level(spec, parent, path, depth, current_id, has_previous_level, opts)
     local level = level_for(depth)
     if has_previous_level then
-        append_level_separator(spec, option(opts, 'level_separator_text'), level, opts)
+        append_level_separator(spec, option(opts, 'level_separator_text'), predecessor_level_for(depth), opts)
     end
     append_fold_chip(spec, level, opts)
     local active_node = path_node_at(path, depth)
-    append_tab_run(spec, parent.children or {}, depth, active_node and active_node.id or nil, true, opts)
+    append_tab_run(
+        spec,
+        parent.children or {},
+        depth,
+        active_node and active_node.id or nil,
+        current_id,
+        true,
+        vim.tbl_extend('force', opts or {}, { create_parent = parent })
+    )
 end
 
 --- @param root table
 --- @param opts? table
 --- @return table[]
 local function build_children(root, opts)
-    local active_node = find_active_node(root) or (root.children and root.children[1]) or root
+    local active_node = find_active_node(root)
+        or find_selected_node(root)
+        or (root.children and root.children[1])
+        or root
+    local current_id = active_node and active_node.id or nil
     local path = path_to(root, active_node and active_node.id or nil)
     local children = {}
     local leading_padding = option(opts, 'leading_padding')
@@ -514,18 +671,31 @@ local function build_children(root, opts)
     for depth = 0, math.max(#path - 2, 0) do
         local parent = path[depth + 1]
         if parent ~= nil and #(parent.children or {}) > 0 then
-            append_path_level(children, parent, path, depth, has_previous_level, opts)
+            append_path_level(children, parent, path, depth, current_id, has_previous_level, opts)
             has_previous_level = true
         end
     end
 
-    if active_node ~= nil and #(active_node.children or {}) > 0 then
+    if active_node ~= nil and (opts.create_controls ~= false or #(active_node.children or {}) > 0) then
         local child_depth = math.max(#path - 1, 0)
         local child_level = level_for(child_depth)
         if has_previous_level then
-            append_level_separator(children, option(opts, 'child_separator_text'), child_level, opts)
+            append_level_separator(
+                children,
+                option(opts, 'child_separator_text'),
+                predecessor_level_for(child_depth),
+                opts
+            )
         end
-        append_tab_run(children, active_node.children, child_depth, nil, false, opts)
+        append_tab_run(
+            children,
+            active_node.children or {},
+            child_depth,
+            nil,
+            current_id,
+            false,
+            vim.tbl_extend('force', opts or {}, { create_parent = active_node })
+        )
     end
 
     return children

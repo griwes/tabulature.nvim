@@ -10,6 +10,7 @@ local NODE_FIELDS = {
     'kind',
     'children',
     'active',
+    'selected_child',
     'dirty',
     'pinned',
     'source',
@@ -52,6 +53,35 @@ local function emit_change(root)
     end
 end
 
+--- @param root table
+--- @param id any
+--- @return table[]
+local function path_to_nodes(root, id)
+    local path = {}
+
+    local function visit(node)
+        path[#path + 1] = node
+        if node.id == id then
+            return true
+        end
+
+        for _, child in ipairs(node.children or {}) do
+            if visit(child) then
+                return true
+            end
+        end
+
+        path[#path] = nil
+        return false
+    end
+
+    if visit(root) then
+        return path
+    end
+
+    return {}
+end
+
 --- Create a normalized hierarchy node.
 --- @param data table
 --- @return table
@@ -65,6 +95,7 @@ function M.node(data)
         kind = data.kind or 'tab',
         children = {},
         active = data.active == true,
+        selected_child = data.selected_child,
         dirty = data.dirty == true,
         pinned = data.pinned == true,
         source = data.source or 'user',
@@ -146,10 +177,23 @@ end
 --- @return table?
 function M.set_active(root, id)
     local selected
+    local path = path_to_nodes(root, id)
+    local path_by_id = {}
+    for index, node in ipairs(path) do
+        path_by_id[node.id] = {
+            index = index,
+            node = node,
+        }
+    end
+
     for _, node in ipairs(M.flatten(root)) do
         node.active = node.id == id
         if node.active then
             selected = node
+        end
+        if path_by_id[node.id] ~= nil then
+            local next_node = path[path_by_id[node.id].index + 1]
+            node.selected_child = next_node and next_node.id or nil
         end
     end
     emit_change(root)
@@ -174,29 +218,32 @@ end
 --- @param id any
 --- @return table[]
 function M.path_to(root, id)
-    local path = {}
+    return path_to_nodes(root, id)
+end
 
-    local function visit(node)
-        path[#path + 1] = node
-        if node.id == id then
-            return true
-        end
-
-        for _, child in ipairs(node.children or {}) do
-            if visit(child) then
-                return true
+--- Resolve the selected-child chain below a node.
+--- @param root table
+--- @param id any
+--- @return table?
+function M.resolve_selected_child(root, id)
+    local node = M.find(root, id)
+    local seen = {}
+    while node ~= nil and node.selected_child ~= nil and not seen[node.id] do
+        seen[node.id] = true
+        local child = nil
+        for _, candidate in ipairs(node.children or {}) do
+            if candidate.id == node.selected_child then
+                child = candidate
+                break
             end
         end
-
-        path[#path] = nil
-        return false
+        if child == nil then
+            break
+        end
+        node = child
     end
 
-    if visit(root) then
-        return path
-    end
-
-    return {}
+    return node
 end
 
 --- Serialize a tree snapshot suitable for transfer to a Manifold host.
@@ -226,6 +273,7 @@ function M.from_manifold_domains(domains, opts)
                 label = domain.label or domain.name or tostring(domain.id),
                 kind = 'domain',
                 active = domain.active,
+                selected_child = domain.selected_child,
                 dirty = domain.dirty,
                 pinned = domain.pinned,
                 source = 'host',
@@ -265,6 +313,7 @@ function M.from_ext_tabline(tabline, opts)
                 label = tab.label or tab.name or tostring(tab.tab or tab.id),
                 kind = 'child-tab',
                 active = tab.active == true or tab.tab == current or tab.id == current,
+                selected_child = tab.selected_child,
                 dirty = tab.dirty,
                 pinned = tab.pinned,
                 source = 'fallback-ext-tabline',

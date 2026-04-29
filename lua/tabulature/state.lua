@@ -11,6 +11,7 @@ tabs[root_id] = {
     children = {},
     tab_level = 1,
     current_tab = root_id,
+    selected_child = nil,
     current_levels = {},
 }
 
@@ -45,6 +46,7 @@ local function tab_model_node(tab)
         kind = tab_kind(tab),
         source = 'child',
         tab_handle = type(tab.id) == 'number' and tab.id or nil,
+        selected_child = tab.selected_child,
         render_meta = {
             tab_level = tab.tab_level,
         },
@@ -78,6 +80,42 @@ local function set_tree_active(tab_id)
     if tree_nodes[tab_id] ~= nil then
         model.set_active(tree_root, tab_id)
     end
+end
+
+local function set_selected_child(tab_id, child_id)
+    if tabs[tab_id] == nil then
+        return
+    end
+    tabs[tab_id].selected_child = child_id
+    tabs[tab_id].current_tab = child_id or tab_id
+    if tree_nodes[tab_id] ~= nil then
+        tree_nodes[tab_id].selected_child = child_id
+    end
+end
+
+local function update_selected_child_chain(tab_id, clear_selected_child)
+    local child = tab_id
+    local parent = tabs[child] and tabs[child].parent or nil
+    while parent ~= nil do
+        set_selected_child(parent, child)
+        child = parent
+        parent = tabs[child] and tabs[child].parent or nil
+    end
+
+    if clear_selected_child then
+        set_selected_child(tab_id, nil)
+    end
+end
+
+local function is_descendant_of(tab_id, ancestor_id)
+    local parent = tabs[tab_id] and tabs[tab_id].parent or nil
+    while parent ~= nil do
+        if parent == ancestor_id then
+            return true
+        end
+        parent = tabs[parent] and tabs[parent].parent or nil
+    end
+    return false
 end
 
 local function active_path(root)
@@ -125,6 +163,7 @@ function M.add_tab(name, id, parent_id)
         children = {},
         tab_level = parent_level + 1,
         current_tab = id,
+        selected_child = nil,
         current_levels = current_levels,
     }
 
@@ -146,6 +185,7 @@ end
 
 function M.set_current_tab(tab_id)
     current_tab = tab_id
+    update_selected_child_chain(tab_id, false)
     set_tree_active(tab_id)
     emit_change()
 end
@@ -236,6 +276,7 @@ vim.api.nvim_create_autocmd('TabClosed', {
         local tab_id = current_tab_list[tonumber(vim.fn.expand('<afile>'))]
         assert(tab_id ~= nil)
         local tab = tabs[tab_id]
+        local replacement_selected_child = tab.selected_child
 
         remove_tree_child(tab.parent, tab_id)
         for _, child_id in ipairs(tab.children) do
@@ -248,6 +289,9 @@ vim.api.nvim_create_autocmd('TabClosed', {
             end
         end
 
+        if tabs[tab.parent].selected_child == tab_id then
+            set_selected_child(tab.parent, replacement_selected_child)
+        end
         tree_nodes[tab_id] = nil
         table_remove_element(tabs[tab.parent].children, tab_id)
         tabs[tab_id] = nil
@@ -267,8 +311,10 @@ function M.create_child(parent_id, name)
 end
 
 function M.compute_switch_target(tab_id)
-    while tabs[tab_id].current_tab ~= tab_id do
-        tab_id = tabs[tab_id].current_tab
+    local seen = {}
+    while tabs[tab_id] ~= nil and tabs[tab_id].selected_child ~= nil and not seen[tab_id] do
+        seen[tab_id] = true
+        tab_id = tabs[tab_id].selected_child
     end
     return tab_id
 end
@@ -279,7 +325,7 @@ function M.update_switch_targets(tab_id)
     local parent = tabs[tab_id].parent
     while parent ~= nil do
         if current_levels[tabs[parent].tab_level] ~= nil then
-            tabs[parent].current_tab = tab_id
+            set_selected_child(parent, tab_id)
             emit_change()
             break
         end
@@ -306,13 +352,25 @@ function _G.tabulature_unfold_level(level, _, _, _)
 end
 
 function _G.tabulature_switch_tab(tab_id, _, _, _)
-    tab_id = M.compute_switch_target(tab_id)
-    vim.api.nvim_set_current_tabpage(tab_id)
+    if tabs[tab_id] == nil then
+        return nil
+    end
+
+    if tab_id == current_tab or is_descendant_of(current_tab, tab_id) then
+        set_selected_child(tab_id, nil)
+        vim.api.nvim_set_current_tabpage(tab_id)
+        return tab_id
+    end
+
+    local target = M.compute_switch_target(tab_id)
+    vim.api.nvim_set_current_tabpage(target)
+    return target
 end
 
 function _G.tabulature_switch_tab_direct(tab_id, _, _, _)
-    tabs[tab_id].current_tab = tab_id
+    set_selected_child(tab_id, nil)
     vim.api.nvim_set_current_tabpage(tab_id)
+    return tab_id
 end
 
 return M

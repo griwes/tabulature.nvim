@@ -48,12 +48,13 @@ end
 
 --- Configure optional Tabulature integrations.
 --- Tabline rendering is owned by Statuesque; Tabulature only provides the
---- `statuesque.widgets.tabulature()` component consumed by that surface.
---- @param opts? { manifold?: boolean|table, commands?: boolean, theme?: boolean|table, style?: 'inherit'|'slanted'|'capsule'|string }
+--- `statuesque.widgets.tabulature` runtimepath widget consumed by that surface.
+--- @param opts? { manifold?: boolean|table, commands?: boolean, theme?: boolean|table, style?: 'inherit'|'slanted'|'capsule'|string, hover?: boolean }
 function M.setup(opts)
     opts = opts or {}
     require('tabulature.config').configure({
         style = opts.style,
+        hover = opts.hover,
     })
     subscribe_to_statuesque_style()
     setup_theme(opts)

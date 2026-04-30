@@ -1,3 +1,5 @@
+local model = require('tabulature.model')
+
 local M = {}
 
 local DEFAULTS = {
@@ -79,9 +81,15 @@ end
 --- @return table
 local function resolved_opts(opts)
     opts = opts or {}
+    local config = require('tabulature.config')
     local name = resolved_style_name(opts)
     local style_opts = STYLE_DEFAULTS[name] or STYLE_DEFAULTS.capsule
+    local hover = opts.hover
+    if hover == nil then
+        hover = config.hover_enabled()
+    end
     return vim.tbl_deep_extend('force', style_opts, opts, {
+        hover = hover,
         style = name,
     })
 end
@@ -204,6 +212,39 @@ local function click_action(node, opts)
     }
 end
 
+--- @param role string
+--- @param node? table
+--- @param depth? integer
+--- @param opts? table
+--- @param extra? table
+--- @return function?
+local function hover_action(role, node, depth, opts, extra)
+    if opts and (opts.hover == false or opts.hover_action == false) then
+        return nil
+    end
+
+    local args = vim.tbl_extend('force', extra or {}, {
+        role = role,
+        id = node and node.id or nil,
+        label = node and node.label or nil,
+        kind = node and node.kind or nil,
+        source = node and node.source or nil,
+        depth = depth,
+        level = depth and level_for(depth) or nil,
+        manifold_domain_id = node and node.manifold_domain_id or nil,
+        child_id = node and node.child_id or nil,
+        tab_handle = node and node.tab_handle or nil,
+    })
+
+    if opts and type(opts.hover_action) == 'function' then
+        return function(payload)
+            return opts.hover_action(vim.tbl_extend('force', args, payload or {}))
+        end
+    end
+
+    return require('tabulature.hovers').callback(args)
+end
+
 --- @param node table
 --- @param opts? table
 --- @return function?
@@ -289,13 +330,15 @@ end
 --- @param hl string
 --- @param role string
 --- @param on_click? function|table
+--- @param on_hover? function
 --- @return table
-local function text_node(text, hl, role, on_click)
+local function text_node(text, hl, role, on_click, on_hover)
     return {
         text = text,
         hl = hl,
         role = role,
         on_click = on_click,
+        on_hover = on_hover,
     }
 end
 
@@ -367,11 +410,19 @@ end
 --- @param opts? table
 local function append_fold_chip(spec, level, opts)
     local action = fold_level_action(level, opts)
+    local hover = hover_action('level-fold', nil, level - 1, opts, {
+        action = 'fold',
+    })
     spec[#spec + 1] =
-        text_node(option(opts, 'tab_left_cap_text'), fold_solid_hl(level, opts), 'level-fold-left', action)
-    spec[#spec + 1] = text_node(option(opts, 'fold_text'), fold_hl(level, opts), 'level-fold', action)
-    spec[#spec + 1] =
-        text_node(option(opts, 'tab_right_cap_text'), fold_level_solid_hl(level, opts), 'level-fold-right', action)
+        text_node(option(opts, 'tab_left_cap_text'), fold_solid_hl(level, opts), 'level-fold-left', action, hover)
+    spec[#spec + 1] = text_node(option(opts, 'fold_text'), fold_hl(level, opts), 'level-fold', action, hover)
+    spec[#spec + 1] = text_node(
+        option(opts, 'tab_right_cap_text'),
+        fold_level_solid_hl(level, opts),
+        'level-fold-right',
+        action,
+        hover
+    )
     spec[#spec + 1] = text_node(option(opts, 'tab_gap_text'), level_hl(level, opts), 'tab-gap')
 end
 
@@ -391,10 +442,22 @@ local function append_create_chip(spec, parent, level, has_tabs, opts)
     end
     local left_hl = has_tabs and fold_level_solid_hl(level, opts) or fold_solid_hl(level, opts)
     local action = create_child_action(parent, opts)
-    spec[#spec + 1] = text_node(option(opts, 'tab_left_cap_text'), left_hl, 'level-create-left', action)
-    spec[#spec + 1] = text_node(option(opts, 'create_text'), fold_hl(level, opts), 'level-create', action)
+    local hover = hover_action('level-create', parent, level - 1, opts, {
+        action = 'create_child',
+        parent_id = parent and parent.id or nil,
+        parent_label = parent and parent.label or nil,
+        parent_kind = parent and parent.kind or nil,
+    })
+    spec[#spec + 1] = text_node(option(opts, 'tab_left_cap_text'), left_hl, 'level-create-left', action, hover)
+    spec[#spec + 1] = text_node(option(opts, 'create_text'), fold_hl(level, opts), 'level-create', action, hover)
     spec[#spec + 1] =
-        text_node(option(opts, 'tab_right_cap_text'), fold_solid_hl(level, opts), 'level-create-right', action)
+        text_node(option(opts, 'tab_right_cap_text'), fold_solid_hl(level, opts), 'level-create-right', action, hover)
+end
+
+--- @param opts? table
+--- @return boolean
+local function create_controls_enabled(opts)
+    return not (opts and opts.create_controls == false)
 end
 
 --- @param node table
@@ -445,6 +508,10 @@ local function tab_body_children(node, depth, selected, current, opts, close)
             text = option(opts, 'close_text'),
             role = 'tab-close',
             on_click = close,
+            on_hover = hover_action('tab-close', node, depth, opts, {
+                selected = selected,
+                current = current,
+            }),
         }
     end
 
@@ -470,6 +537,10 @@ local function tab_contents(node, depth, selected, current, opts)
         {
             role = 'tab-body',
             on_click = click_action(node, opts),
+            on_hover = hover_action('tab-body', node, depth, opts, {
+                selected = selected,
+                current = current,
+            }),
             children = tab_body_children(node, depth, selected, current, opts, close),
         },
     }
@@ -531,57 +602,6 @@ local function find_active_node(root)
     return nil
 end
 
---- @param root table
---- @return table?
-local function find_selected_node(root)
-    local node = root
-    local seen = {}
-    while node ~= nil and node.selected_child ~= nil and not seen[node.id] do
-        seen[node.id] = true
-        local selected = nil
-        for _, child in ipairs(node.children or {}) do
-            if child.id == node.selected_child then
-                selected = child
-                break
-            end
-        end
-        if selected == nil then
-            break
-        end
-        node = selected
-    end
-    return node
-end
-
---- @param root table
---- @param target any
---- @return table[]
-local function path_to(root, target)
-    local path = {}
-
-    local function visit(node)
-        path[#path + 1] = node
-        if node.id == target then
-            return true
-        end
-
-        for _, child in ipairs(node.children or {}) do
-            if visit(child) then
-                return true
-            end
-        end
-
-        path[#path] = nil
-        return false
-    end
-
-    if target ~= nil and visit(root) then
-        return path
-    end
-
-    return { root }
-end
-
 --- @param path table[]
 --- @param depth integer
 --- @return table?
@@ -607,6 +627,7 @@ end
 local function append_tab_run(spec, nodes, depth, active_id, current_id, starts_on_level, opts)
     local level = level_for(depth)
     local count = #(nodes or {})
+    local has_create_chip = create_controls_enabled(opts)
     for index, node in ipairs(nodes or {}) do
         if index > 1 then
             spec[#spec + 1] = text_node(option(opts, 'tab_gap_text'), level_hl(level, opts), 'tab-gap')
@@ -618,7 +639,7 @@ local function append_tab_run(spec, nodes, depth, active_id, current_id, starts_
             node_is_active(node, active_id),
             node_is_active(node, current_id),
             index == 1 and not starts_on_level,
-            index == count,
+            index == count and not has_create_chip,
             opts
         )
     end
@@ -654,12 +675,13 @@ end
 --- @param opts? table
 --- @return table[]
 local function build_children(root, opts)
-    local active_node = find_active_node(root)
-        or find_selected_node(root)
-        or (root.children and root.children[1])
-        or root
+    local active_node = find_active_node(root) or root
     local current_id = active_node and active_node.id or nil
-    local path = path_to(root, active_node and active_node.id or nil)
+    local path = model.resolve_selected_path(root, active_node and active_node.id or root.id)
+    if #path == 0 then
+        path = { root }
+    end
+    active_node = path[#path] or active_node
     local children = {}
     local leading_padding = option(opts, 'leading_padding')
     local has_previous_level = false

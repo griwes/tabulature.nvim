@@ -72,6 +72,11 @@ describe('tabulature prototype state integration', function()
         assert_equal(state.get_tab(one_child).selected_child, one_leaf)
         assert_equal(state.get_tab(top_four).selected_child, four_child)
         assert_equal(state.get_tab(four_child).selected_child, four_leaf)
+        assert_equal(
+            table.concat(state.compute_switch_path(top_one), ','),
+            table.concat({ top_one, one_child, one_leaf }, ',')
+        )
+        assert_equal(state.compute_switch_target(top_four), four_leaf)
 
         _G.tabulature_switch_tab(top_one)
         assert_equal(vim.api.nvim_get_current_tabpage(), one_leaf)
@@ -94,7 +99,7 @@ describe('tabulature prototype state integration', function()
         local origin = vim.api.nvim_list_tabpages()[1]
         vim.api.nvim_set_current_tabpage(origin)
 
-        local rendered = require('statuesque').render(require('statuesque.widgets').tabulature()(), 'tabline')
+        local rendered = require('statuesque').render({ name = 'tabulature' }, 'tabline')
         assert(rendered:find('@v:lua.__statuesque_click@', 1, true), rendered)
         assert(rendered:find('', 1, true), rendered)
 
@@ -139,7 +144,7 @@ describe('tabulature prototype state integration', function()
         local parent = tabulature.create_tab({ label = 'Plus Parent' })
         local before = #vim.api.nvim_list_tabpages()
 
-        local rendered = require('statuesque').render(require('statuesque.widgets').tabulature()(), 'tabline')
+        local rendered = require('statuesque').render({ name = 'tabulature' }, 'tabline')
         assert(rendered:find('󰐕', 1, true), rendered)
 
         local create_click

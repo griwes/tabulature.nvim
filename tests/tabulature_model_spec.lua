@@ -111,6 +111,13 @@ describe('tabulature hierarchy model', function()
 
         assert_equal(model.resolve_selected_child(root, 'tab:1').id, 'tab:3')
         assert_equal(model.resolve_selected_child(root, 'tab:4').id, 'tab:6')
+        assert_equal(#model.resolve_selected_path(root, 'tab:4'), 4)
+        assert_equal(model.resolve_selected_path(root, 'tab:4')[1].id, 'workspace')
+        assert_equal(model.resolve_selected_path(root, 'tab:4')[2].id, 'tab:4')
+        assert_equal(model.resolve_selected_path(root, 'tab:4')[3].id, 'tab:5')
+        assert_equal(model.resolve_selected_path(root, 'tab:4')[4].id, 'tab:6')
+        assert_equal(model.resolve_selected_id(root, 'tab:4'), 'tab:6')
+        assert_equal(table.concat(model.resolve_selected_path_ids(root, 'tab:4'), ','), 'workspace,tab:4,tab:5,tab:6')
 
         model.set_active(root, 'tab:6')
 
@@ -121,12 +128,42 @@ describe('tabulature hierarchy model', function()
         assert_equal(model.find(root, 'tab:1').selected_child, 'tab:2')
     end)
 
+    it('keeps selected-path resolution safe for stale selected children', function()
+        local root = model.root({
+            children = {
+                {
+                    id = 'tab:1',
+                    label = '1',
+                    selected_child = 'tab:missing',
+                    children = {
+                        {
+                            id = 'tab:2',
+                            label = '2',
+                        },
+                    },
+                },
+            },
+        })
+
+        local path = model.resolve_selected_path(root, 'tab:1')
+
+        assert_equal(#path, 2)
+        assert_equal(path[1].id, 'workspace')
+        assert_equal(path[2].id, 'tab:1')
+        assert_equal(model.resolve_selected_child(root, 'tab:1').id, 'tab:1')
+        assert_equal(model.resolve_selected_child(root, 'tab:missing'), nil)
+    end)
+
     it('serializes snapshots without function values', function()
         local root = model.root({
             children = {
                 {
                     id = 'domain:alpha',
                     label = 'Alpha',
+                    session = {
+                        id = 'session:alpha',
+                        restore = 'subtree',
+                    },
                     render_meta = {
                         max_width = 12,
                         callback = function() end,
@@ -139,6 +176,74 @@ describe('tabulature hierarchy model', function()
 
         assert_equal(snapshot.children[1].render_meta.max_width, 12)
         assert_equal(snapshot.children[1].render_meta.callback, nil)
+        assert_equal(snapshot.children[1].session.id, 'session:alpha')
+        assert_equal(snapshot.children[1].session.restore, 'subtree')
+    end)
+
+    it('resolves inherited session attachments and provider payloads', function()
+        local root = model.root({
+            children = {
+                {
+                    id = 'tab:1',
+                    label = '1',
+                    session = {
+                        id = 'session:rooted',
+                        restore = 'subtree',
+                    },
+                    children = {
+                        {
+                            id = 'tab:2',
+                            label = '2',
+                            children = {
+                                {
+                                    id = 'tab:3',
+                                    label = '3',
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        })
+
+        local session, owner = model.resolve_session(root, 'tab:3')
+        assert_equal(session.id, 'session:rooted')
+        assert_equal(session.restore, 'subtree')
+        assert_equal(owner.id, 'tab:1')
+
+        local seen
+        model.register_session_provider({
+            attach = function(payload)
+                seen = payload
+                return 'attached'
+            end,
+            restore = function(payload)
+                seen = payload
+                return 'restored'
+            end,
+        })
+
+        assert_equal(model.attach_session(root, 'tab:2', { id = 'session:child', restore = 'tab' }), 'attached')
+        assert_equal(seen.action, 'attach')
+        assert_equal(seen.node_id, 'tab:2')
+        assert_equal(seen.parent_id, 'tab:1')
+        assert_equal(seen.session.id, 'session:child')
+        assert_equal(seen.session_owner_id, 'tab:2')
+        assert_equal(seen.path[1], 'workspace')
+        assert_equal(seen.path[2], 'tab:1')
+        assert_equal(seen.path[3], 'tab:2')
+
+        assert_equal(model.restore_session(root, 'tab:3'), 'restored')
+        assert_equal(seen.action, 'restore')
+        assert_equal(seen.node_id, 'tab:3')
+        assert_equal(seen.session.id, 'session:child')
+        assert_equal(seen.session_owner_id, 'tab:2')
+
+        model.register_session_provider(nil)
+        local payload = model.detach_session(root, 'tab:2')
+        assert_equal(payload.action, 'detach')
+        assert_equal(payload.session.id, 'session:rooted')
+        assert_equal(payload.session_owner_id, 'tab:1')
     end)
 
     it('builds Manifold domain trees', function()
@@ -240,7 +345,7 @@ describe('tabulature hierarchy model', function()
         assert_equal(spec.children[11].hl, 'Tabulature1')
         assert_equal(spec.children[11].children[1].children[2].text, '󰓪 ')
         assert_equal(spec.children[12].role, 'tab-trailing-separator')
-        assert_equal(spec.children[12].hl, 'TabulatureSolid1')
+        assert_equal(spec.children[12].hl, 'TabulatureLevelSolid1')
         assert_equal(spec.children[13].role, 'level-create-gap')
         assert_equal(spec.children[13].text, ' ')
         assert_equal(spec.children[13].hl, 'TabulatureLevel1')
@@ -261,7 +366,7 @@ describe('tabulature hierarchy model', function()
         assert_equal(spec.children[17].hl, 'TabulatureSeparator1')
         assert_equal(spec.children[18].hl, 'TabulatureSolid2')
         assert_equal(spec.children[19].role, 'tab')
-        assert_equal(spec.children[20].hl, 'TabulatureSolid2')
+        assert_equal(spec.children[20].hl, 'TabulatureLevelSolid2')
         assert_equal(spec.children[21].role, 'level-create-gap')
         assert_equal(spec.children[21].text, ' ')
         assert_equal(spec.children[22].role, 'level-create-left')
@@ -278,6 +383,158 @@ describe('tabulature hierarchy model', function()
         assert(text:find('Alpha', 1, true), text)
         assert(text:find('Beta', 1, true), text)
         assert(text:find('Scratch', 1, true), text)
+    end)
+
+    it('keeps the final tab cap connected to the create chip background', function()
+        local root = model.from_manifold_domains({
+            {
+                id = 'domain:1',
+                label = 'Alpha',
+                active = true,
+            },
+            {
+                id = 'domain:2',
+                label = 'Beta',
+            },
+        })
+
+        local with_create = statuesque_render.to_spec(root, { style = 'capsule' }).children
+        assert_equal(with_create[12].role, 'tab-trailing-separator')
+        assert_equal(with_create[12].hl, 'TabulatureLevelSolid1')
+        assert_equal(with_create[13].role, 'level-create-gap')
+        assert_equal(with_create[14].role, 'level-create-left')
+        assert_equal(with_create[14].hl, 'TabulatureFoldLevelSolid1')
+
+        local without_create = statuesque_render.to_spec(root, {
+            style = 'capsule',
+            create_controls = false,
+        }).children
+        assert_equal(without_create[#without_create].role, 'tab-trailing-separator')
+        assert_equal(without_create[#without_create].hl, 'TabulatureSolid1')
+    end)
+
+    it('emits semantic hover affordances for interactive tabline controls', function()
+        local root = model.from_manifold_domains({
+            {
+                id = 'domain:1',
+                label = 'Alpha',
+                active = true,
+                manifold_domain_id = 1,
+                children = {
+                    {
+                        id = 'tab:1',
+                        label = 'Scratch',
+                        kind = 'tab',
+                    },
+                },
+            },
+        })
+
+        local seen = {}
+        local spec = statuesque_render.to_spec(root, {
+            style = 'capsule',
+            hover_action = function(payload)
+                seen[#seen + 1] = payload
+                return payload.role
+            end,
+        })
+        local fold = first_child_with_role(spec, 'level-fold')
+        local create = first_child_with_role(spec, 'level-create')
+        local alpha_body = first_child_with_id(spec, 'domain:1').children[1]
+
+        assert_equal(type(fold.on_hover), 'function')
+        assert_equal(fold.on_hover({ phase = 'enter' }), 'level-fold')
+        assert_equal(seen[#seen].role, 'level-fold')
+        assert_equal(seen[#seen].action, 'fold')
+        assert_equal(first_child_with_role(spec, 'level-fold-left').on_hover, fold.on_hover)
+        assert_equal(first_child_with_role(spec, 'level-fold-right').on_hover, fold.on_hover)
+        assert_equal(type(create.on_hover), 'function')
+        assert_equal(create.on_hover({ phase = 'enter' }), 'level-create')
+        assert_equal(seen[#seen].role, 'level-create')
+        assert_equal(seen[#seen].action, 'create_child')
+        assert_equal(first_child_with_role(spec, 'level-create-left').on_hover, create.on_hover)
+        assert_equal(first_child_with_role(spec, 'level-create-right').on_hover, create.on_hover)
+        assert_equal(type(alpha_body.on_hover), 'function')
+        assert_equal(alpha_body.on_hover({ phase = 'move' }), 'tab-body')
+        assert_equal(seen[#seen].role, 'tab-body')
+        assert_equal(seen[#seen].id, 'domain:1')
+        assert_equal(seen[#seen].label, 'Alpha')
+        assert_equal(seen[#seen].kind, 'domain')
+        assert_equal(seen[#seen].manifold_domain_id, 1)
+        assert_equal(seen[#seen].selected, true)
+        assert_equal(seen[#seen].current, true)
+
+        local disabled = statuesque_render.to_spec(root, {
+            style = 'capsule',
+            hover_action = false,
+        })
+        assert_equal(first_child_with_role(disabled, 'level-fold').on_hover, nil)
+        assert_equal(first_child_with_id(disabled, 'domain:1').children[1].on_hover, nil)
+
+        require('tabulature.config').configure({ hover = false })
+        local config_disabled = statuesque_render.to_spec(root, { style = 'capsule' })
+        assert_equal(first_child_with_role(config_disabled, 'level-fold').on_hover, nil)
+        assert_equal(first_child_with_id(config_disabled, 'domain:1').children[1].on_hover, nil)
+
+        local render_enabled = statuesque_render.to_spec(root, {
+            style = 'capsule',
+            hover = true,
+        })
+        assert_equal(type(first_child_with_role(render_enabled, 'level-fold').on_hover), 'function')
+        require('tabulature.config').configure({ hover = true })
+    end)
+
+    it('emits hover metadata for local close controls', function()
+        local hovers = require('tabulature.hovers')
+        local handle = vim.api.nvim_get_current_tabpage()
+        local root = model.root({
+            children = {
+                {
+                    id = handle,
+                    label = 'Local',
+                    kind = 'tab',
+                    active = true,
+                    tab_handle = handle,
+                },
+            },
+        })
+
+        local spec = statuesque_render.to_spec(root, {
+            local_actions = true,
+            style = 'capsule',
+        })
+        local body = first_child_with_id(spec, tostring(handle)).children[1]
+        local close = first_child_with_role(body, 'tab-close')
+
+        assert_equal(type(close.on_hover), 'function')
+        local result = close.on_hover({
+            phase = 'enter',
+            mouse = {
+                screenrow = 1,
+                screencol = 1,
+            },
+        })
+        assert_equal(result.role, 'tab-close')
+        assert_equal(result.id, handle)
+        assert_equal(result.tab_handle, handle)
+        assert_equal(result.selected, true)
+        assert_equal(result.current, true)
+        vim.wait(100, function()
+            return hovers._win ~= nil and vim.api.nvim_win_is_valid(hovers._win)
+        end)
+        assert(hovers._win ~= nil and vim.api.nvim_win_is_valid(hovers._win), 'missing hover tooltip window')
+        local win_config = vim.api.nvim_win_get_config(hovers._win)
+        assert_equal(win_config.relative, 'editor')
+        assert_equal(win_config.row, 1)
+        assert_equal(win_config.zindex, 90)
+        local lines = vim.api.nvim_buf_get_lines(hovers._buf, 0, -1, false)
+        assert_equal(lines[1], ' Close Local ')
+        assert_equal(lines[2], ' Click to close this local tab. ')
+        close.on_hover({ phase = 'leave' })
+        vim.wait(100, function()
+            return hovers._win == nil or not vim.api.nvim_win_is_valid(hovers._win)
+        end)
+        assert(hovers._win == nil or not vim.api.nvim_win_is_valid(hovers._win), 'hover tooltip window stayed open')
     end)
 
     it('distinguishes selected path tabs from the current tab marker', function()

@@ -1,5 +1,6 @@
 local M = {}
 
+local SESSION_PROVIDER = nil
 local WATCHERS = setmetatable({}, {
     __mode = 'k',
 })
@@ -17,6 +18,7 @@ local NODE_FIELDS = {
     'manifold_domain_id',
     'child_id',
     'tab_handle',
+    'session',
     'session_id',
     'worktree_id',
     'render_meta',
@@ -44,6 +46,18 @@ end
 local function append_child(parent, child)
     parent.children[#parent.children + 1] = child
     return child
+end
+
+--- @param parent table
+--- @param id any
+--- @return table?
+local function direct_child_by_id(parent, id)
+    for _, child in ipairs(parent.children or {}) do
+        if child.id == id then
+            return child
+        end
+    end
+    return nil
 end
 
 local function emit_change(root)
@@ -140,6 +154,18 @@ function M.add_child(parent, child)
     return child
 end
 
+--- Register an optional session provider adapter.
+--- @param provider? table
+--- @return table? previous_provider
+function M.register_session_provider(provider)
+    if provider ~= nil then
+        assert(type(provider) == 'table', 'session provider must be a table')
+    end
+    local previous = SESSION_PROVIDER
+    SESSION_PROVIDER = provider
+    return previous
+end
+
 --- Return a flat preorder list of nodes.
 --- @param root table
 --- @return table[]
@@ -221,29 +247,169 @@ function M.path_to(root, id)
     return path_to_nodes(root, id)
 end
 
+--- Return node ids for an already resolved path.
+--- @param path table[]
+--- @return any[]
+function M.path_ids(path)
+    local ids = {}
+    for _, node in ipairs(path or {}) do
+        ids[#ids + 1] = node.id
+    end
+    return ids
+end
+
+--- Resolve the session attachment inherited by a node.
+--- @param root table
+--- @param id any
+--- @return table? session
+--- @return table? owner
+function M.resolve_session(root, id)
+    local session = nil
+    local owner = nil
+
+    for _, node in ipairs(path_to_nodes(root, id)) do
+        if node.session ~= nil then
+            session = copy_plain(node.session)
+            owner = node
+        elseif node.session_id ~= nil then
+            session = { id = node.session_id }
+            owner = node
+        end
+    end
+
+    return session, owner
+end
+
+--- @param root table
+--- @param id any
+--- @param action string
+--- @param opts? table
+--- @return table
+local function session_payload(root, id, action, opts)
+    local path = path_to_nodes(root, id)
+    local node = path[#path]
+    local parent = path[#path - 1]
+    local session, owner = M.resolve_session(root, id)
+    local path_ids = {}
+    for _, path_node in ipairs(path) do
+        path_ids[#path_ids + 1] = path_node.id
+    end
+
+    return vim.tbl_extend('force', opts or {}, {
+        action = action,
+        node_id = id,
+        node = node and M.node(node) or nil,
+        parent_id = parent and parent.id or nil,
+        path = path_ids,
+        session = session,
+        session_owner_id = owner and owner.id or nil,
+    })
+end
+
+--- Request a session provider action for a tab node.
+--- @param root table
+--- @param id any
+--- @param action string
+--- @param opts? table
+--- @return any
+function M.request_session(root, id, action, opts)
+    assert(type(action) == 'string' and action ~= '', 'session action must be a non-empty string')
+    local payload = session_payload(root, id, action, opts)
+    if SESSION_PROVIDER == nil then
+        return payload
+    end
+
+    local handler = SESSION_PROVIDER[action] or SESSION_PROVIDER.on_request
+    if type(handler) == 'function' then
+        return handler(payload)
+    end
+
+    return payload
+end
+
+--- Attach serializable session metadata to a tab node.
+--- @param root table
+--- @param id any
+--- @param session table|string
+--- @param opts? table
+--- @return any
+function M.attach_session(root, id, session, opts)
+    local node = M.find(root, id)
+    assert(node ~= nil, 'cannot attach session to missing node')
+    node.session = type(session) == 'table' and copy_plain(session) or { id = session }
+    node.session_id = node.session.id
+    emit_change(root)
+    return M.request_session(root, id, 'attach', opts)
+end
+
+--- Remove direct session metadata from a tab node.
+--- @param root table
+--- @param id any
+--- @param opts? table
+--- @return any
+function M.detach_session(root, id, opts)
+    local node = M.find(root, id)
+    assert(node ~= nil, 'cannot detach session from missing node')
+    node.session = nil
+    node.session_id = nil
+    emit_change(root)
+    return M.request_session(root, id, 'detach', opts)
+end
+
+--- Request restore for the session resolved at a tab node.
+--- @param root table
+--- @param id any
+--- @param opts? table
+--- @return any
+function M.restore_session(root, id, opts)
+    return M.request_session(root, id, 'restore', opts)
+end
+
 --- Resolve the selected-child chain below a node.
 --- @param root table
 --- @param id any
 --- @return table?
 function M.resolve_selected_child(root, id)
-    local node = M.find(root, id)
+    local path = M.resolve_selected_path(root, id)
+    return path[#path]
+end
+
+--- Resolve the id of the deepest selected descendant below a node.
+--- @param root table
+--- @param id any
+--- @return any?
+function M.resolve_selected_id(root, id)
+    local node = M.resolve_selected_child(root, id)
+    return node and node.id or nil
+end
+
+--- Return the root-to-leaf path after following selected-child links from `id`.
+--- @param root table
+--- @param id any
+--- @return table[]
+function M.resolve_selected_path(root, id)
+    local path = path_to_nodes(root, id)
+    local node = path[#path]
     local seen = {}
     while node ~= nil and node.selected_child ~= nil and not seen[node.id] do
         seen[node.id] = true
-        local child = nil
-        for _, candidate in ipairs(node.children or {}) do
-            if candidate.id == node.selected_child then
-                child = candidate
-                break
-            end
-        end
+        local child = direct_child_by_id(node, node.selected_child)
         if child == nil then
             break
         end
+        path[#path + 1] = child
         node = child
     end
 
-    return node
+    return path
+end
+
+--- Return ids for the selected-child path below a node.
+--- @param root table
+--- @param id any
+--- @return any[]
+function M.resolve_selected_path_ids(root, id)
+    return M.path_ids(M.resolve_selected_path(root, id))
 end
 
 --- Serialize a tree snapshot suitable for transfer to a Manifold host.

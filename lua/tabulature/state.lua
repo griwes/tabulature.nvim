@@ -119,12 +119,7 @@ local function is_descendant_of(tab_id, ancestor_id)
 end
 
 local function active_path(root)
-    local path = model.path_to(root, current_tab)
-    local ids = {}
-    for _, node in ipairs(path) do
-        ids[#ids + 1] = node.id
-    end
-    return ids
+    return model.path_ids(model.path_to(root, current_tab))
 end
 
 ---@param root? table
@@ -310,13 +305,21 @@ function M.create_child(parent_id, name)
     return vim.api.nvim_get_current_tabpage()
 end
 
-function M.compute_switch_target(tab_id)
-    local seen = {}
-    while tabs[tab_id] ~= nil and tabs[tab_id].selected_child ~= nil and not seen[tab_id] do
-        seen[tab_id] = true
-        tab_id = tabs[tab_id].selected_child
+---@param tab_id any
+---@return any[]
+function M.compute_switch_path(tab_id)
+    local path = model.resolve_selected_path_ids(tree_root, tab_id)
+    if path[1] == tree_root.id then
+        table.remove(path, 1)
     end
-    return tab_id
+    return path
+end
+
+---@param tab_id any
+---@return any
+function M.compute_switch_target(tab_id)
+    local path = M.compute_switch_path(tab_id)
+    return path[#path] or tab_id
 end
 
 function M.update_switch_targets(tab_id)

@@ -2,10 +2,12 @@ local M = {}
 
 --- @class tabulature.Config
 --- @field style? 'inherit'|'slanted'|'capsule'|string
+--- @field hover? boolean
 
 --- @type tabulature.Config
 M.config = {
     style = 'inherit',
+    hover = true,
 }
 
 --- @param opts? tabulature.Config
@@ -16,6 +18,11 @@ end
 --- @return string
 function M.style()
     return M.config.style or 'inherit'
+end
+
+--- @return boolean
+function M.hover_enabled()
+    return M.config.hover ~= false
 end
 
 return M

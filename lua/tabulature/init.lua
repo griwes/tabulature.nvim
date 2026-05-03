@@ -30,6 +30,26 @@ local function setup_theme(opts)
     require('tabulature.themes.lualine').setup(theme_opts)
 end
 
+local function register_continuity_contributor()
+    local ok, session_plugin = pcall(require, 'continuity')
+
+    if not ok or type(session_plugin) ~= 'table' or type(session_plugin.api) ~= 'table' then
+        return
+    end
+
+    if type(session_plugin.api.register_contributor) ~= 'function' then
+        return
+    end
+
+    local session = require('tabulature.session')
+    session_plugin.api.register_contributor('tabulature', {
+        capture = session.capture,
+        plan_restore = session.plan_restore,
+        restore = session.restore,
+        restore_phase = 'after_mksession',
+    })
+end
+
 local function subscribe_to_statuesque_style()
     if style_subscription ~= nil then
         return
@@ -58,6 +78,7 @@ function M.setup(opts)
     })
     subscribe_to_statuesque_style()
     setup_theme(opts)
+    register_continuity_contributor()
     if opts.commands ~= false then
         install_commands()
     end

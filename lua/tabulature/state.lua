@@ -3,16 +3,23 @@ local model = require('tabulature.model')
 local M = {}
 
 local root_id = -1
-local tabs = {}
-tabs[root_id] = {
-    name = '<root>',
-    id = root_id,
-    parent = nil,
-    children = {},
-    tab_level = 1,
-    current_tab = root_id,
-    selected_child = nil,
-    current_levels = {},
+
+---@return table
+local function root_tab()
+    return {
+        name = '<root>',
+        id = root_id,
+        parent = nil,
+        children = {},
+        tab_level = 1,
+        current_tab = root_id,
+        selected_child = nil,
+        current_levels = {},
+    }
+end
+
+local tabs = {
+    [root_id] = root_tab(),
 }
 
 function M.get_root_id()
@@ -20,20 +27,36 @@ function M.get_root_id()
 end
 
 local current_tab = root_id
+local current_tab_list = {}
 local parent_id_to_use = nil
 local name_to_use = nil
 local manifold_sync = {
     enabled = false,
     opts = {},
 }
-local tree_root = model.root({
-    id = 'tabulature',
-    label = 'Tabulature',
-    source = 'child',
-})
+
+local function new_tree_root()
+    return model.root({
+        id = 'tabulature',
+        label = 'Tabulature',
+        source = 'child',
+    })
+end
+
+local tree_root = new_tree_root()
 local tree_nodes = {
     [root_id] = tree_root,
 }
+
+local function notify_session()
+    local ok, session_plugin = pcall(require, 'continuity')
+
+    if ok and type(session_plugin) == 'table' and type(session_plugin.api) == 'table' then
+        if type(session_plugin.api.notify_contributor_changed) == 'function' then
+            pcall(session_plugin.api.notify_contributor_changed, 'tabulature')
+        end
+    end
+end
 
 local function tab_kind(tab)
     return tab.parent == root_id and 'tab' or 'subtab'
@@ -129,6 +152,8 @@ function M.active_path(root)
 end
 
 local function emit_change()
+    notify_session()
+
     if not manifold_sync.enabled then
         return
     end
@@ -243,7 +268,7 @@ for _, v in ipairs(vim.api.nvim_list_tabpages()) do
 end
 current_tab = vim.api.nvim_get_current_tabpage()
 set_tree_active(current_tab)
-local current_tab_list = vim.api.nvim_list_tabpages()
+current_tab_list = vim.api.nvim_list_tabpages()
 
 vim.api.nvim_create_augroup('TabulatureEvents', { clear = true })
 vim.api.nvim_create_autocmd('TabEnter', {
@@ -334,6 +359,237 @@ function M.update_switch_targets(tab_id)
         end
         parent = tabs[parent].parent
     end
+end
+
+---@param set table<any, any>?
+---@return table<any, boolean>
+local function copy_bool_set(set)
+    local copy = {}
+    for key, value in pairs(set or {}) do
+        if value then
+            copy[key] = true
+        end
+    end
+    return copy
+end
+
+---@param parent_id any
+---@param child_id any?
+---@return integer?
+local function child_index(parent_id, child_id)
+    if child_id == nil or tabs[parent_id] == nil then
+        return nil
+    end
+
+    for index, id in ipairs(tabs[parent_id].children or {}) do
+        if id == child_id then
+            return index
+        end
+    end
+
+    return nil
+end
+
+---@param tab_id any
+---@return table
+local function capture_tab(tab_id)
+    local tab = tabs[tab_id]
+    local children = {}
+
+    for _, child_id in ipairs(tab.children or {}) do
+        children[#children + 1] = capture_tab(child_id)
+    end
+
+    return {
+        label = tab.name,
+        kind = tab_kind(tab),
+        selected_child_index = child_index(tab_id, tab.selected_child),
+        active = tab_id == current_tab,
+        current_levels = copy_bool_set(tab.current_levels),
+        children = children,
+    }
+end
+
+---@return integer[]
+local function current_active_path_indexes()
+    local path = {}
+    local parent_id = root_id
+
+    while tabs[parent_id] ~= nil do
+        local matched_index = nil
+        local matched_child = nil
+
+        for index, child_id in ipairs(tabs[parent_id].children or {}) do
+            if child_id == current_tab or is_descendant_of(current_tab, child_id) then
+                matched_index = index
+                matched_child = child_id
+                break
+            end
+        end
+
+        if matched_index == nil then
+            break
+        end
+
+        path[#path + 1] = matched_index
+        if matched_child == current_tab then
+            break
+        end
+
+        parent_id = matched_child
+    end
+
+    return path
+end
+
+---@param root_children table[]
+---@param active_path integer[]
+local function mark_active_path(root_children, active_path)
+    local nodes = root_children
+    for _, index in ipairs(active_path) do
+        local node = nodes[index]
+        if node == nil then
+            return
+        end
+        node.active = true
+        nodes = node.children or {}
+    end
+end
+
+---@param nodes table[]
+---@return boolean
+local function has_active_node(nodes)
+    for _, node in ipairs(nodes or {}) do
+        if node.active == true or has_active_node(node.children) then
+            return true
+        end
+    end
+
+    return false
+end
+
+---@return table
+function M.session_snapshot()
+    local active_path = current_active_path_indexes()
+    local children = {}
+
+    for _, child_id in ipairs(tabs[root_id].children or {}) do
+        children[#children + 1] = capture_tab(child_id)
+    end
+
+    if #active_path == 0 and #children > 0 then
+        active_path[1] = 1
+        mark_active_path(children, active_path)
+    end
+
+    return {
+        version = 1,
+        active_path = active_path,
+        children = children,
+    }
+end
+
+---@param nodes table[]
+---@return integer
+local function count_nodes(nodes)
+    local count = 0
+
+    for _, node in ipairs(nodes or {}) do
+        count = count + 1 + count_nodes(node.children)
+    end
+
+    return count
+end
+
+---@param needed integer
+---@return integer[]
+local function ensure_tabpages(needed)
+    local tabpages = vim.api.nvim_list_tabpages()
+
+    while #tabpages < needed do
+        vim.cmd('tabnew')
+        tabpages = vim.api.nvim_list_tabpages()
+    end
+
+    return tabpages
+end
+
+local function reset_state()
+    tabs = {
+        [root_id] = root_tab(),
+    }
+    tree_root = new_tree_root()
+    tree_nodes = {
+        [root_id] = tree_root,
+    }
+end
+
+---@param nodes table[]
+---@param parent_id any
+---@param tabpages integer[]
+---@param cursor table
+---@return any? active_id
+---@return any[] restored_ids
+local function restore_nodes(nodes, parent_id, tabpages, cursor)
+    local active_id = nil
+    local restored_ids = {}
+
+    for _, node in ipairs(nodes or {}) do
+        cursor.index = cursor.index + 1
+        local tab_id = tabpages[cursor.index]
+
+        if tab_id ~= nil then
+            M.add_tab(tostring(node.label or tab_id), tab_id, parent_id)
+            tabs[tab_id].current_levels = copy_bool_set(node.current_levels)
+            restored_ids[#restored_ids + 1] = tab_id
+
+            local child_active, child_ids = restore_nodes(node.children, tab_id, tabpages, cursor)
+            local selected_index = tonumber(node.selected_child_index)
+            local selected_child = selected_index ~= nil and child_ids[selected_index] or nil
+            tabs[tab_id].selected_child = selected_child
+            tabs[tab_id].current_tab = selected_child or tab_id
+            if tree_nodes[tab_id] ~= nil then
+                tree_nodes[tab_id].selected_child = selected_child
+            end
+
+            if node.active == true then
+                active_id = tab_id
+            end
+            active_id = child_active or active_id
+        end
+    end
+
+    return active_id, restored_ids
+end
+
+---@param snapshot table
+---@return table
+function M.restore_session_snapshot(snapshot)
+    assert(type(snapshot) == 'table', 'tabulature session snapshot must be a table')
+
+    local children = type(snapshot.children) == 'table' and snapshot.children or {}
+    if #children == 0 then
+        return M.session_snapshot()
+    end
+
+    if not has_active_node(children) and type(snapshot.active_path) == 'table' then
+        mark_active_path(children, snapshot.active_path)
+    end
+
+    local tabpages = ensure_tabpages(count_nodes(children))
+
+    reset_state()
+    local active_id = restore_nodes(children, root_id, tabpages, { index = 0 })
+
+    current_tab = active_id or tabpages[1] or vim.api.nvim_get_current_tabpage()
+    current_tab_list = vim.api.nvim_list_tabpages()
+    if vim.api.nvim_tabpage_is_valid(current_tab) then
+        vim.api.nvim_set_current_tabpage(current_tab)
+    end
+    set_tree_active(current_tab)
+    emit_change()
+
+    return M.session_snapshot()
 end
 
 function _G.tabulature_create_child(parent_id, _, _, _)

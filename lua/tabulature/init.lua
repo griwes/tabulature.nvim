@@ -46,7 +46,7 @@ local function register_continuity_contributor()
         capture = session.capture,
         plan_restore = session.plan_restore,
         restore = session.restore,
-        restore_phase = 'after_mksession',
+        restore_phase = 'after_layout',
     })
 end
 

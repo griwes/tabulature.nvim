@@ -189,7 +189,7 @@ local function click_action(node, opts)
     if handle ~= nil then
         return function()
             if type(_G.tabulature_switch_tab) == 'function' then
-                return _G.tabulature_switch_tab(handle)
+                return _G.tabulature_switch_tab(node.id)
             end
             if vim and vim.api and vim.api.nvim_tabpage_is_valid(handle) then
                 return vim.api.nvim_set_current_tabpage(handle)
@@ -278,9 +278,7 @@ local function create_child_action(parent, opts)
             local parent_id
             if parent == nil or parent.kind == 'workspace' then
                 parent_id = type(state.get_root_id) == 'function' and state.get_root_id() or nil
-            elseif type(parent.tab_handle) == 'number' then
-                parent_id = parent.tab_handle
-            elseif type(parent.id) == 'number' then
+            elseif parent.id ~= nil then
                 parent_id = parent.id
             end
 

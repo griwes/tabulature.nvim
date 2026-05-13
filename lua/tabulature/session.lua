@@ -1,4 +1,5 @@
 local state = require('tabulature.state')
+local persistence = require('tabulature.persistence')
 
 local M = {}
 
@@ -7,15 +8,26 @@ local M = {}
 ---@field active_path integer[]
 ---@field children table[]
 
----@return tabulature.SessionSnapshot
+---@class tabulature.SessionSnapshotRef
+---@field version integer
+---@field state_ref { kind: string, state_file: string, state_dir: string, snapshot_id: string }
+
+---@return tabulature.SessionSnapshot|tabulature.SessionSnapshotRef
 function M.capture()
-    return state.session_snapshot()
+    local snapshot = state.session_snapshot()
+
+    if require('tabulature.config').config.persist_snapshots == false then
+        return snapshot
+    end
+
+    return persistence.save_snapshot(snapshot)
 end
 
----@param captured tabulature.SessionSnapshot
+---@param captured tabulature.SessionSnapshot|tabulature.SessionSnapshotRef
 ---@return continuity.RestorePlanStep[]
 function M.plan_restore(captured)
-    local children = type(captured) == 'table' and type(captured.children) == 'table' and captured.children or {}
+    local snapshot = persistence.load_snapshot(captured)
+    local children = type(snapshot) == 'table' and type(snapshot.children) == 'table' and snapshot.children or {}
 
     if #children == 0 then
         return {}
@@ -38,7 +50,8 @@ function M.restore(step)
         error(string.format('Unsupported Tabulature restore step: %s', step.kind))
     end
 
-    return state.restore_session_snapshot(step.payload)
+    local snapshot = persistence.load_snapshot(step.payload)
+    return state.restore_session_snapshot(snapshot or {})
 end
 
 return M

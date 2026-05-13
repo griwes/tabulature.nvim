@@ -11,3 +11,10 @@ Tabulature contributes that component as `lua/statuesque/widgets/tabulature.lua`
 on runtimepath. Statuesque consumes it through the normal `{ name = 'tabulature' }`
 widget reference shape; Tabulature keeps the state lookup, rendering adapter, and
 local tab actions in its own repository.
+
+Session captures are backed by Tabulature-owned snapshot files. By default
+`state_file` points at `stdpath('state')/tabulature.nvim/snapshots.json`, the
+full hierarchy snapshots are written one JSON file each under `state_dir`, and
+session-manager integrations receive only a stable `tabulature.snapshot`
+reference. This keeps Tabulature usable with session managers other than
+Continuity while avoiding duplicated tab-tree payloads in Continuity records.

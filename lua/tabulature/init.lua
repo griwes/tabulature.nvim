@@ -69,15 +69,19 @@ end
 --- Configure optional Tabulature integrations.
 --- Tabline rendering is owned by Statuesque; Tabulature only provides the
 --- `statuesque.widgets.tabulature` runtimepath widget consumed by that surface.
---- @param opts? { manifold?: boolean|table, commands?: boolean, theme?: boolean|table, style?: 'inherit'|'slanted'|'capsule'|string, hover?: boolean }
+--- @param opts? { manifold?: boolean|table, commands?: boolean, theme?: boolean|table, style?: 'inherit'|'slanted'|'capsule'|string, hover?: boolean, persist_snapshots?: boolean, state_file?: string, state_dir?: string }
 function M.setup(opts)
     opts = opts or {}
     require('tabulature.config').configure({
         style = opts.style,
         hover = opts.hover,
+        persist_snapshots = opts.persist_snapshots,
+        state_file = opts.state_file,
+        state_dir = opts.state_dir,
     })
     subscribe_to_statuesque_style()
     setup_theme(opts)
+    require('tabulature.state').adopt_existing_tabpages()
     register_continuity_contributor()
     if opts.commands ~= false then
         install_commands()
@@ -90,7 +94,7 @@ end
 
 --- Create a top-level Neovim tab in Tabulature's hierarchy.
 --- @param opts? string|{ label?: string }
---- @return integer tabpage
+--- @return any tab_id
 function M.create_tab(opts)
     opts = opts or {}
     local state = require('tabulature.state')
@@ -99,7 +103,7 @@ end
 
 --- Create a Neovim tab nested below the current Tabulature tab.
 --- @param opts? string|{ label?: string, parent_id?: any }
---- @return integer tabpage
+--- @return any tab_id
 function M.create_subtab(opts)
     opts = opts or {}
     local parent_id = type(opts) == 'table' and opts.parent_id or nil
@@ -110,7 +114,7 @@ end
 
 --- Create a chain of real Neovim tabs below the current Tabulature tab.
 --- @param opts? string|{ label?: string, depth?: integer }
---- @return integer[] tabpages
+--- @return any[] tab_ids
 function M.create_nested(opts)
     opts = opts or {}
     local depth = type(opts) == 'table' and tonumber(opts.depth) or nil
@@ -125,6 +129,20 @@ function M.create_nested(opts)
         parent_id = id
     end
     return ids
+end
+
+--- Return the id of the current Tabulature node.
+--- @return any? tab_id
+function M.current_tab_id()
+    local tab = require('tabulature.state').get_current_tab()
+    return tab and tab.id or nil
+end
+
+--- Adopt the current real Neovim tabpage into Tabulature's hierarchy.
+--- @param opts? { parent_id?: any, label?: string, auto_label?: boolean }
+--- @return any tab_id
+function M.adopt_current_tabpage(opts)
+    return require('tabulature.state').adopt_current_tabpage(opts)
 end
 
 --- Publish the current hierarchy to any detected external consumers.

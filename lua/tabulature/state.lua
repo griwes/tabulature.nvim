@@ -21,6 +21,8 @@ end
 local tabs = {
     [root_id] = root_tab(),
 }
+local tabpage_to_id = {}
+local next_tab_id = 1
 
 function M.get_root_id()
     return root_id
@@ -30,6 +32,8 @@ local current_tab = root_id
 local current_tab_list = {}
 local parent_id_to_use = nil
 local name_to_use = nil
+local last_left_bufnr = nil
+local reset_state
 local manifold_sync = {
     enabled = false,
     opts = {},
@@ -62,13 +66,46 @@ local function tab_kind(tab)
     return tab.parent == root_id and 'tab' or 'subtab'
 end
 
+---@return string
+local function allocate_tab_id()
+    local id = string.format('tabulature:%d', next_tab_id)
+    next_tab_id = next_tab_id + 1
+    return id
+end
+
+---@param id any
+local function account_for_tab_id(id)
+    if type(id) ~= 'string' then
+        return
+    end
+
+    local index = id:match('^tabulature:(%d+)$')
+    if index ~= nil then
+        next_tab_id = math.max(next_tab_id, tonumber(index) + 1)
+    end
+end
+
+---@param tab_id any
+---@return any
+local function resolve_tab_id(tab_id)
+    if tabs[tab_id] ~= nil then
+        return tab_id
+    end
+
+    if type(tab_id) == 'number' then
+        return tabpage_to_id[tab_id] or tab_id
+    end
+
+    return tab_id
+end
+
 local function tab_model_node(tab)
     return model.node({
         id = tab.id,
         label = tab.name,
         kind = tab_kind(tab),
         source = 'child',
-        tab_handle = type(tab.id) == 'number' and tab.id or nil,
+        tab_handle = tab.tabpage,
         selected_child = tab.selected_child,
         render_meta = {
             tab_level = tab.tab_level,
@@ -171,32 +208,54 @@ end
 
 function M.add_tab(name, id, parent_id)
     parent_id = parent_id or root_id
+    parent_id = resolve_tab_id(parent_id)
+
+    if tabs[parent_id] == nil then
+        parent_id = root_id
+    end
+
+    local tabpage = type(id) == 'number' and id or nil
+    local tab_id = tabpage ~= nil and allocate_tab_id() or id or allocate_tab_id()
+    account_for_tab_id(tab_id)
 
     local parent_level = tabs[parent_id].tab_level
     local current_levels = tabs[parent_id].current_levels
     current_levels[parent_level] = true
 
-    tabs[id] = {
-        name = name,
-        id = id,
+    tabs[tab_id] = {
+        name = name or tostring(tab_id),
+        id = tab_id,
+        tabpage = tabpage,
         parent = parent_id,
         children = {},
         tab_level = parent_level + 1,
-        current_tab = id,
+        current_tab = tab_id,
         selected_child = nil,
         current_levels = current_levels,
     }
 
-    table.insert(tabs[parent_id].children, id)
-    append_tree_node(parent_id, id)
+    if tabpage ~= nil then
+        tabpage_to_id[tabpage] = tab_id
+    end
+
+    table.insert(tabs[parent_id].children, tab_id)
+    append_tree_node(parent_id, tab_id)
     emit_change()
 
-    return id
+    return tab_id
 end
 
 function M.get_tab(tab_id)
     tab_id = tab_id or root_id
+    tab_id = resolve_tab_id(tab_id)
     return tabs[tab_id]
+end
+
+---@param tab_id any
+---@return integer?
+function M.tabpage_for(tab_id)
+    local tab = M.get_tab(tab_id)
+    return tab and tab.tabpage or nil
 end
 
 function M.get_current_tab()
@@ -204,6 +263,7 @@ function M.get_current_tab()
 end
 
 function M.set_current_tab(tab_id)
+    tab_id = resolve_tab_id(tab_id)
     current_tab = tab_id
     update_selected_child_chain(tab_id, false)
     set_tree_active(tab_id)
@@ -260,79 +320,370 @@ local function index_of(table, element)
 end
 
 local function table_remove_element(t, element)
-    return table.remove(t, index_of(t, element))
+    local index = index_of(t, element)
+    if index < 1 then
+        return nil
+    end
+    return table.remove(t, index)
 end
 
-for _, v in ipairs(vim.api.nvim_list_tabpages()) do
-    M.add_tab(tostring(v), v)
+local function refresh_tab_metadata(tab_id)
+    local tab = tabs[tab_id]
+    if tab == nil or tab.parent == nil or tabs[tab.parent] == nil then
+        return
+    end
+
+    tab.tab_level = tabs[tab.parent].tab_level + 1
+    tab.current_levels = tabs[tab.parent].current_levels
+
+    local node = tree_nodes[tab_id]
+    if node ~= nil then
+        node.kind = tab_kind(tab)
+        node.render_meta = node.render_meta or {}
+        node.render_meta.tab_level = tab.tab_level
+    end
+
+    for _, child_id in ipairs(tab.children or {}) do
+        refresh_tab_metadata(child_id)
+    end
 end
-current_tab = vim.api.nvim_get_current_tabpage()
-set_tree_active(current_tab)
+
+local function move_tab(tab_id, parent_id)
+    tab_id = resolve_tab_id(tab_id)
+    parent_id = resolve_tab_id(parent_id)
+
+    local tab = tabs[tab_id]
+    if tab == nil or tabs[parent_id] == nil or tab.parent == parent_id then
+        return false
+    end
+
+    if tab_id == parent_id or is_descendant_of(parent_id, tab_id) then
+        return false
+    end
+
+    local old_parent = tab.parent
+    table_remove_element(tabs[old_parent].children, tab_id)
+    table.insert(tabs[parent_id].children, tab_id)
+    tab.parent = parent_id
+
+    local node = remove_tree_child(old_parent, tab_id) or tree_nodes[tab_id]
+    if node ~= nil then
+        table.insert(tree_nodes[parent_id].children, node)
+    end
+
+    if tabs[old_parent].selected_child == tab_id then
+        set_selected_child(old_parent, nil)
+    end
+
+    refresh_tab_metadata(tab_id)
+    return true
+end
+
+---@param bufnr integer
+---@param opts? { ignore_bufnr?: integer }
+---@return string?
+local function buffer_label(bufnr, opts)
+    if opts ~= nil and opts.ignore_bufnr == bufnr then
+        return nil
+    end
+
+    local name = vim.api.nvim_buf_get_name(bufnr)
+
+    if name ~= '' then
+        return name:match('[^/\\]+$') or name
+    end
+
+    return nil
+end
+
+---@return string?
+local function current_buffer_label()
+    return buffer_label(vim.api.nvim_get_current_buf())
+end
+
+---@param tabpage integer
+---@param opts? { ignore_bufnr?: integer }
+---@return string?
+local function tabpage_buffer_label(tabpage, opts)
+    if not vim.api.nvim_tabpage_is_valid(tabpage) then
+        return nil
+    end
+
+    local ok, window = pcall(vim.api.nvim_tabpage_get_win, tabpage)
+    if not ok or not vim.api.nvim_win_is_valid(window) then
+        return nil
+    end
+
+    return buffer_label(vim.api.nvim_win_get_buf(window), opts)
+end
+
+---@param tabpage integer
+---@param opts? { ignore_bufnr?: integer }
+---@return string
+local function label_for_current_tabpage(tabpage, opts)
+    local label = tabpage_buffer_label(tabpage, opts)
+    if label ~= nil then
+        return label
+    end
+
+    return tostring(tabpage)
+end
+
+local function refresh_adopted_current_tab_label()
+    local tabpage = vim.api.nvim_get_current_tabpage()
+    local tab_id = tabpage_to_id[tabpage]
+    local tab = tabs[tab_id]
+    if tab == nil or tab.auto_label ~= true then
+        return
+    end
+
+    local label = current_buffer_label()
+    if label == nil or label == tab.name then
+        return
+    end
+
+    tab.name = label
+    if tree_nodes[tab_id] ~= nil then
+        tree_nodes[tab_id].label = label
+    end
+    emit_change()
+    vim.cmd([[ redrawtabline ]])
+end
+
+local function update_tab_label(tab_id, label)
+    if label == nil or tabs[tab_id] == nil or tabs[tab_id].name == label then
+        return false
+    end
+
+    tabs[tab_id].name = label
+    if tree_nodes[tab_id] ~= nil then
+        tree_nodes[tab_id].label = label
+    end
+    return true
+end
+
+local function remove_registered_tab(tabpage, tab_id)
+    local tab = tabs[tab_id]
+    if tab == nil then
+        tabpage_to_id[tabpage] = nil
+        return false
+    end
+
+    local replacement_selected_child = tab.selected_child
+
+    remove_tree_child(tab.parent, tab_id)
+    for _, child_id in ipairs(tab.children) do
+        tabs[child_id].parent = tab.parent
+        table.insert(tabs[tab.parent].children, child_id)
+        local child_node = remove_tree_child(tab_id, child_id) or tree_nodes[child_id]
+        if child_node ~= nil then
+            table.insert(tree_nodes[tab.parent].children, child_node)
+        end
+        refresh_tab_metadata(child_id)
+    end
+
+    if tabs[tab.parent].selected_child == tab_id then
+        set_selected_child(tab.parent, replacement_selected_child)
+    end
+
+    if current_tab == tab_id then
+        current_tab = replacement_selected_child or tab.parent or root_id
+    end
+
+    tree_nodes[tab_id] = nil
+    tabpage_to_id[tabpage] = nil
+    table_remove_element(tabs[tab.parent].children, tab_id)
+    tabs[tab_id] = nil
+
+    return true
+end
+
+local function prune_closed_tabpages()
+    local valid_tabpages = {}
+    for _, tabpage in ipairs(vim.api.nvim_list_tabpages()) do
+        valid_tabpages[tabpage] = true
+    end
+
+    local removed = false
+    local stale = {}
+    for tabpage, tab_id in pairs(tabpage_to_id) do
+        if valid_tabpages[tabpage] ~= true or not vim.api.nvim_tabpage_is_valid(tabpage) then
+            stale[#stale + 1] = { tabpage = tabpage, tab_id = tab_id }
+        end
+    end
+
+    for _, item in ipairs(stale) do
+        removed = remove_registered_tab(item.tabpage, item.tab_id) or removed
+    end
+
+    local known_tabpages = {}
+    local seen = {}
+    for _, tabpage in ipairs(current_tab_list) do
+        if valid_tabpages[tabpage] == true and seen[tabpage] ~= true then
+            known_tabpages[#known_tabpages + 1] = tabpage
+            seen[tabpage] = true
+        end
+    end
+    for tabpage in pairs(tabpage_to_id) do
+        if valid_tabpages[tabpage] == true and seen[tabpage] ~= true then
+            known_tabpages[#known_tabpages + 1] = tabpage
+            seen[tabpage] = true
+        end
+    end
+    current_tab_list = known_tabpages
+
+    local current_tabpage = vim.api.nvim_get_current_tabpage()
+    local mapped_current = tabpage_to_id[current_tabpage]
+    if mapped_current ~= nil then
+        current_tab = mapped_current
+        set_tree_active(mapped_current)
+    elseif tabs[current_tab] == nil then
+        current_tab = root_id
+        set_tree_active(root_id)
+    end
+
+    if removed then
+        emit_change()
+        vim.cmd([[ redrawtabline ]])
+    end
+
+    return removed
+end
+
 current_tab_list = vim.api.nvim_list_tabpages()
 
 vim.api.nvim_create_augroup('TabulatureEvents', { clear = true })
+vim.api.nvim_create_autocmd('TabLeave', {
+    group = 'TabulatureEvents',
+    callback = function()
+        last_left_bufnr = vim.api.nvim_get_current_buf()
+    end,
+})
 vim.api.nvim_create_autocmd('TabEnter', {
     group = 'TabulatureEvents',
     callback = function()
-        local id = vim.api.nvim_get_current_tabpage()
+        local tabpage = vim.api.nvim_get_current_tabpage()
+        local id = tabpage_to_id[tabpage]
+        local new_tabpage = index_of(current_tab_list, tabpage) < 1
 
-        if tabs[id] == nil then
-            M.add_tab(name_to_use or tostring(id), id, parent_id_to_use or M.get_current_tab().parent)
+        if id == nil and (name_to_use ~= nil or parent_id_to_use ~= nil or new_tabpage) then
+            local current = tabs[current_tab]
+            local parent_id = parent_id_to_use or (current and current.parent) or root_id
+            local label_opts = new_tabpage
+                    and name_to_use == nil
+                    and parent_id_to_use == nil
+                    and {
+                        ignore_bufnr = last_left_bufnr,
+                    }
+                or nil
+            id = M.add_tab(name_to_use or label_for_current_tabpage(tabpage, label_opts), tabpage, parent_id)
+            if new_tabpage and name_to_use == nil and parent_id_to_use == nil then
+                tabs[id].auto_label = true
+            end
         end
 
         current_tab_list = vim.api.nvim_list_tabpages()
-        M.update_switch_targets(id)
-        M.set_current_tab(id)
+        if id ~= nil then
+            M.update_switch_targets(id)
+            M.set_current_tab(id)
+        end
         parent_id_to_use = nil
         name_to_use = nil
         vim.cmd([[ redrawtabline ]])
     end,
 })
+vim.api.nvim_create_autocmd({ 'BufEnter', 'BufFilePost' }, {
+    group = 'TabulatureEvents',
+    callback = refresh_adopted_current_tab_label,
+})
 vim.api.nvim_create_autocmd('TabClosed', {
     group = 'TabulatureEvents',
     callback = function()
-        -- I hate this, but <afile> gives you the *index* of the closed tab instead of its handle.
-        -- Sigh.
-        local tab_id = current_tab_list[tonumber(vim.fn.expand('<afile>'))]
-        assert(tab_id ~= nil)
-        local tab = tabs[tab_id]
-        local replacement_selected_child = tab.selected_child
-
-        remove_tree_child(tab.parent, tab_id)
-        for _, child_id in ipairs(tab.children) do
-            tabs[child_id].parent = tab.parent
-            table.insert(tabs[tab.parent].children, child_id)
-            local child_node = remove_tree_child(tab_id, child_id) or tree_nodes[child_id]
-            if child_node ~= nil then
-                child_node.kind = tab_kind(tabs[child_id])
-                table.insert(tree_nodes[tab.parent].children, child_node)
-            end
-        end
-
-        if tabs[tab.parent].selected_child == tab_id then
-            set_selected_child(tab.parent, replacement_selected_child)
-        end
-        tree_nodes[tab_id] = nil
-        table_remove_element(tabs[tab.parent].children, tab_id)
-        tabs[tab_id] = nil
-        emit_change()
-        current_tab_list = vim.api.nvim_list_tabpages()
-        if tab_id ~= current_tab then
-            vim.cmd([[ redrawtabline ]])
-        end
+        prune_closed_tabpages()
     end,
 })
 
 function M.create_child(parent_id, name)
-    parent_id_to_use = parent_id or current_tab
+    parent_id_to_use = resolve_tab_id(parent_id or current_tab)
     name_to_use = name
     vim.cmd([[ tabnew ]])
-    return vim.api.nvim_get_current_tabpage()
+    return current_tab
+end
+
+--- Adopt the current real Neovim tabpage into Tabulature's hierarchy.
+--- Existing adopted tabpages can be moved under an explicit parent; this lets
+--- external `tabedit` producers create real tabs first, then restore the
+--- intended Tabulature parent after Neovim fires `TabEnter`.
+--- @param opts? { parent_id?: any, label?: string, auto_label?: boolean }
+--- @return any tab_id
+function M.adopt_current_tabpage(opts)
+    opts = opts or {}
+    local tabpage = vim.api.nvim_get_current_tabpage()
+    local tab_id = tabpage_to_id[tabpage]
+    local parent_id = opts.parent_id ~= nil and resolve_tab_id(opts.parent_id) or nil
+
+    if parent_id ~= nil and tabs[parent_id] == nil then
+        parent_id = nil
+    end
+
+    local label = opts.label or label_for_current_tabpage(tabpage)
+    if tab_id == nil then
+        tab_id = M.add_tab(label, tabpage, parent_id or root_id)
+        tabs[tab_id].auto_label = opts.auto_label ~= false and opts.label == nil
+    elseif parent_id ~= nil then
+        move_tab(tab_id, parent_id)
+    end
+
+    if opts.label ~= nil or tabs[tab_id].auto_label == true then
+        update_tab_label(tab_id, label)
+    end
+
+    M.update_switch_targets(tab_id)
+    M.set_current_tab(tab_id)
+    return tab_id
+end
+
+---Adopt any already-existing Neovim tabpages into the Tabulature model.
+---This covers the initial tabpage, which exists before Tabulature's TabEnter
+---autocmds are installed, and session-manager restores that recreate physical
+---tabs before plugin contributors run.
+---@param opts? { auto_label?: boolean, reset?: boolean }
+---@return any[] tab_ids
+function M.adopt_existing_tabpages(opts)
+    opts = opts or {}
+    local adopted = {}
+
+    if opts.reset == true then
+        reset_state()
+    end
+
+    for _, tabpage in ipairs(vim.api.nvim_list_tabpages()) do
+        local tab_id = tabpage_to_id[tabpage]
+
+        if tab_id == nil then
+            tab_id = M.add_tab(label_for_current_tabpage(tabpage), tabpage, root_id)
+            tabs[tab_id].auto_label = opts.auto_label ~= false
+        end
+
+        adopted[#adopted + 1] = tab_id
+    end
+
+    current_tab_list = vim.api.nvim_list_tabpages()
+
+    local current = tabpage_to_id[vim.api.nvim_get_current_tabpage()]
+    if current ~= nil then
+        M.set_current_tab(current)
+    elseif #adopted > 0 then
+        M.set_current_tab(adopted[1])
+    end
+
+    return adopted
 end
 
 ---@param tab_id any
 ---@return any[]
 function M.compute_switch_path(tab_id)
+    tab_id = resolve_tab_id(tab_id)
     local path = model.resolve_selected_path_ids(tree_root, tab_id)
     if path[1] == tree_root.id then
         table.remove(path, 1)
@@ -343,11 +694,13 @@ end
 ---@param tab_id any
 ---@return any
 function M.compute_switch_target(tab_id)
+    tab_id = resolve_tab_id(tab_id)
     local path = M.compute_switch_path(tab_id)
     return path[#path] or tab_id
 end
 
 function M.update_switch_targets(tab_id)
+    tab_id = resolve_tab_id(tab_id)
     local current_levels = tabs[tab_id].current_levels
 
     local parent = tabs[tab_id].parent
@@ -401,8 +754,10 @@ local function capture_tab(tab_id)
     end
 
     return {
+        id = tab.id,
         label = tab.name,
         kind = tab_kind(tab),
+        auto_label = tab.auto_label == true,
         selected_child_index = child_index(tab_id, tab.selected_child),
         active = tab_id == current_tab,
         current_levels = copy_bool_set(tab.current_levels),
@@ -470,6 +825,8 @@ end
 
 ---@return table
 function M.session_snapshot()
+    prune_closed_tabpages()
+
     local active_path = current_active_path_indexes()
     local children = {}
 
@@ -501,6 +858,16 @@ local function count_nodes(nodes)
     return count
 end
 
+---@param tabpage integer
+local function close_tabpage(tabpage)
+    if not vim.api.nvim_tabpage_is_valid(tabpage) or #vim.api.nvim_list_tabpages() <= 1 then
+        return
+    end
+
+    pcall(vim.api.nvim_set_current_tabpage, tabpage)
+    pcall(vim.cmd, 'silent! tabclose!')
+end
+
 ---@param needed integer
 ---@return integer[]
 local function ensure_tabpages(needed)
@@ -511,17 +878,53 @@ local function ensure_tabpages(needed)
         tabpages = vim.api.nvim_list_tabpages()
     end
 
+    while #tabpages > needed do
+        close_tabpage(tabpages[#tabpages])
+        tabpages = vim.api.nvim_list_tabpages()
+    end
+
     return tabpages
 end
 
-local function reset_state()
+reset_state = function()
     tabs = {
         [root_id] = root_tab(),
     }
+    tabpage_to_id = {}
     tree_root = new_tree_root()
     tree_nodes = {
         [root_id] = tree_root,
     }
+end
+
+---@param id any
+---@return string?
+local function generated_id_label(id)
+    if type(id) ~= 'string' then
+        return nil
+    end
+
+    return id:match('^tabulature:(%d+)$')
+end
+
+---@param node table
+---@param tabpage integer
+---@return string
+---@return boolean
+local function restore_label(node, tabpage)
+    local fallback = generated_id_label(node.id) or tostring(node.id or tabpage)
+    local saved_label = tostring(node.label or fallback)
+    local actual_label = tabpage_buffer_label(tabpage)
+
+    if node.auto_label == true then
+        return fallback, false
+    end
+
+    if node.auto_label == nil and actual_label ~= nil and saved_label == actual_label then
+        return fallback, false
+    end
+
+    return saved_label, false
 end
 
 ---@param nodes table[]
@@ -536,10 +939,17 @@ local function restore_nodes(nodes, parent_id, tabpages, cursor)
 
     for _, node in ipairs(nodes or {}) do
         cursor.index = cursor.index + 1
-        local tab_id = tabpages[cursor.index]
+        local tabpage = tabpages[cursor.index]
 
-        if tab_id ~= nil then
-            M.add_tab(tostring(node.label or tab_id), tab_id, parent_id)
+        if tabpage ~= nil then
+            local label, auto_label = restore_label(node, tabpage)
+            local tab_id = M.add_tab(label, node.id or tabpage, parent_id)
+            tabs[tab_id].tabpage = tabpage
+            tabs[tab_id].auto_label = auto_label
+            tabpage_to_id[tabpage] = tab_id
+            if tree_nodes[tab_id] ~= nil then
+                tree_nodes[tab_id].tab_handle = tabpage
+            end
             tabs[tab_id].current_levels = copy_bool_set(node.current_levels)
             restored_ids[#restored_ids + 1] = tab_id
 
@@ -569,6 +979,7 @@ function M.restore_session_snapshot(snapshot)
 
     local children = type(snapshot.children) == 'table' and snapshot.children or {}
     if #children == 0 then
+        M.adopt_existing_tabpages({ reset = true })
         return M.session_snapshot()
     end
 
@@ -579,12 +990,13 @@ function M.restore_session_snapshot(snapshot)
     local tabpages = ensure_tabpages(count_nodes(children))
 
     reset_state()
-    local active_id = restore_nodes(children, root_id, tabpages, { index = 0 })
+    local active_id, restored_ids = restore_nodes(children, root_id, tabpages, { index = 0 })
 
-    current_tab = active_id or tabpages[1] or vim.api.nvim_get_current_tabpage()
+    current_tab = active_id or restored_ids[1] or root_id
     current_tab_list = vim.api.nvim_list_tabpages()
-    if vim.api.nvim_tabpage_is_valid(current_tab) then
-        vim.api.nvim_set_current_tabpage(current_tab)
+    local active_tabpage = tabs[current_tab] and tabs[current_tab].tabpage or nil
+    if type(active_tabpage) == 'number' and vim.api.nvim_tabpage_is_valid(active_tabpage) then
+        vim.api.nvim_set_current_tabpage(active_tabpage)
     end
     set_tree_active(current_tab)
     emit_change()
@@ -611,24 +1023,32 @@ function _G.tabulature_unfold_level(level, _, _, _)
 end
 
 function _G.tabulature_switch_tab(tab_id, _, _, _)
+    tab_id = resolve_tab_id(tab_id)
     if tabs[tab_id] == nil then
         return nil
     end
 
     if tab_id == current_tab or is_descendant_of(current_tab, tab_id) then
         set_selected_child(tab_id, nil)
-        vim.api.nvim_set_current_tabpage(tab_id)
+        if tabs[tab_id].tabpage ~= nil then
+            vim.api.nvim_set_current_tabpage(tabs[tab_id].tabpage)
+        end
         return tab_id
     end
 
     local target = M.compute_switch_target(tab_id)
-    vim.api.nvim_set_current_tabpage(target)
+    if tabs[target] ~= nil and tabs[target].tabpage ~= nil then
+        vim.api.nvim_set_current_tabpage(tabs[target].tabpage)
+    end
     return target
 end
 
 function _G.tabulature_switch_tab_direct(tab_id, _, _, _)
+    tab_id = resolve_tab_id(tab_id)
     set_selected_child(tab_id, nil)
-    vim.api.nvim_set_current_tabpage(tab_id)
+    if tabs[tab_id] ~= nil and tabs[tab_id].tabpage ~= nil then
+        vim.api.nvim_set_current_tabpage(tabs[tab_id].tabpage)
+    end
     return tab_id
 end
 

@@ -157,6 +157,27 @@ local function tab_handle(node, opts)
     return handle
 end
 
+---@param handle integer
+---@return boolean
+local function close_tabpage(handle)
+    if not vim.api.nvim_tabpage_is_valid(handle) or #vim.api.nvim_list_tabpages() <= 1 then
+        return false
+    end
+
+    local original = vim.api.nvim_get_current_tabpage()
+    local tab_number = vim.api.nvim_tabpage_get_number(handle)
+    local ok = pcall(vim.api.nvim_cmd, {
+        cmd = 'tabclose',
+        args = { tostring(tab_number) },
+        bang = true,
+    }, {})
+    if ok and vim.api.nvim_tabpage_is_valid(original) then
+        pcall(vim.api.nvim_set_current_tabpage, original)
+    end
+
+    return ok and not vim.api.nvim_tabpage_is_valid(handle)
+end
+
 --- @param node table
 --- @param opts? table
 --- @return string
@@ -259,8 +280,7 @@ local function close_action(node, opts)
             return nil
         end
 
-        local tabnr = vim.api.nvim_tabpage_get_number(handle)
-        return pcall(vim.cmd, tostring(tabnr) .. 'tabclose')
+        return close_tabpage(handle)
     end
 end
 

@@ -62,6 +62,25 @@ local function notify_session()
     end
 end
 
+---@param bufnr? integer
+---@return integer
+local function open_tabpage(bufnr)
+    return vim.api.nvim_open_tabpage(bufnr or 0, true, {})
+end
+
+---@param tabpage integer
+local function close_physical_tabpage(tabpage)
+    if not vim.api.nvim_tabpage_is_valid(tabpage) or #vim.api.nvim_list_tabpages() <= 1 then
+        return
+    end
+
+    pcall(vim.api.nvim_cmd, {
+        cmd = 'tabclose',
+        args = { tostring(vim.api.nvim_tabpage_get_number(tabpage)) },
+        bang = true,
+    }, {})
+end
+
 local function tab_kind(tab)
     return tab.parent == root_id and 'tab' or 'subtab'
 end
@@ -83,6 +102,22 @@ local function account_for_tab_id(id)
     if index ~= nil then
         next_tab_id = math.max(next_tab_id, tonumber(index) + 1)
     end
+end
+
+---@param id any
+---@return string?
+local function generated_id_label(id)
+    if type(id) ~= 'string' then
+        return nil
+    end
+
+    return id:match('^tabulature:(%d+)$')
+end
+
+---@param id any
+---@return string
+local function default_tab_label(id)
+    return generated_id_label(id) or tostring(id)
 end
 
 ---@param tab_id any
@@ -223,7 +258,7 @@ function M.add_tab(name, id, parent_id)
     current_levels[parent_level] = true
 
     tabs[tab_id] = {
-        name = name or tostring(tab_id),
+        name = name or default_tab_label(tab_id),
         id = tab_id,
         tabpage = tabpage,
         parent = parent_id,
@@ -429,6 +464,16 @@ local function label_for_current_tabpage(tabpage, opts)
     return tostring(tabpage)
 end
 
+---@param tabpage integer
+---@param opts? { ignore_bufnr?: integer }
+---@return string?
+---@return boolean
+local function auto_label_for_tabpage(tabpage, opts)
+    local label = tabpage_buffer_label(tabpage, opts)
+
+    return label, label ~= nil
+end
+
 local function refresh_adopted_current_tab_label()
     local tabpage = vim.api.nvim_get_current_tabpage()
     local tab_id = tabpage_to_id[tabpage]
@@ -576,9 +621,15 @@ vim.api.nvim_create_autocmd('TabEnter', {
                         ignore_bufnr = last_left_bufnr,
                     }
                 or nil
-            id = M.add_tab(name_to_use or label_for_current_tabpage(tabpage, label_opts), tabpage, parent_id)
+            local label = name_to_use
+            local can_auto_label = false
+            if label == nil then
+                label, can_auto_label = auto_label_for_tabpage(tabpage, label_opts)
+            end
+
+            id = M.add_tab(label, tabpage, parent_id)
             if new_tabpage and name_to_use == nil and parent_id_to_use == nil then
-                tabs[id].auto_label = true
+                tabs[id].auto_label = can_auto_label
             end
         end
 
@@ -606,7 +657,7 @@ vim.api.nvim_create_autocmd('TabClosed', {
 function M.create_child(parent_id, name)
     parent_id_to_use = resolve_tab_id(parent_id or current_tab)
     name_to_use = name
-    vim.cmd([[ tabnew ]])
+    open_tabpage()
     return current_tab
 end
 
@@ -626,15 +677,18 @@ function M.adopt_current_tabpage(opts)
         parent_id = nil
     end
 
-    local label = opts.label or label_for_current_tabpage(tabpage)
+    local derived_label, derived_auto_label = auto_label_for_tabpage(tabpage)
+    local label = opts.label or derived_label
+    local auto_label = opts.auto_label == true
+        or (opts.auto_label ~= false and opts.label == nil and derived_auto_label)
     if tab_id == nil then
         tab_id = M.add_tab(label, tabpage, parent_id or root_id)
-        tabs[tab_id].auto_label = opts.auto_label ~= false and opts.label == nil
+        tabs[tab_id].auto_label = auto_label
     elseif parent_id ~= nil then
         move_tab(tab_id, parent_id)
     end
 
-    if opts.label ~= nil or tabs[tab_id].auto_label == true then
+    if label ~= nil and (opts.label ~= nil or tabs[tab_id].auto_label == true) then
         update_tab_label(tab_id, label)
     end
 
@@ -661,8 +715,10 @@ function M.adopt_existing_tabpages(opts)
         local tab_id = tabpage_to_id[tabpage]
 
         if tab_id == nil then
-            tab_id = M.add_tab(label_for_current_tabpage(tabpage), tabpage, root_id)
-            tabs[tab_id].auto_label = opts.auto_label ~= false
+            local auto_label = opts.auto_label == true
+            local label = auto_label and auto_label_for_tabpage(tabpage) or nil
+            tab_id = M.add_tab(label, tabpage, root_id)
+            tabs[tab_id].auto_label = auto_label
         end
 
         adopted[#adopted + 1] = tab_id
@@ -860,12 +916,7 @@ end
 
 ---@param tabpage integer
 local function close_tabpage(tabpage)
-    if not vim.api.nvim_tabpage_is_valid(tabpage) or #vim.api.nvim_list_tabpages() <= 1 then
-        return
-    end
-
-    pcall(vim.api.nvim_set_current_tabpage, tabpage)
-    pcall(vim.cmd, 'silent! tabclose!')
+    close_physical_tabpage(tabpage)
 end
 
 ---@param needed integer
@@ -874,7 +925,7 @@ local function ensure_tabpages(needed)
     local tabpages = vim.api.nvim_list_tabpages()
 
     while #tabpages < needed do
-        vim.cmd('tabnew')
+        open_tabpage()
         tabpages = vim.api.nvim_list_tabpages()
     end
 
@@ -895,16 +946,6 @@ reset_state = function()
     tree_nodes = {
         [root_id] = tree_root,
     }
-end
-
----@param id any
----@return string?
-local function generated_id_label(id)
-    if type(id) ~= 'string' then
-        return nil
-    end
-
-    return id:match('^tabulature:(%d+)$')
 end
 
 ---@param node table

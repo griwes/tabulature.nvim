@@ -63,29 +63,99 @@ local function read_index()
     return decoded
 end
 
+---@param value any
 ---@return string
-local function allocate_snapshot_id()
-    return string.format('snapshot:%d:%d', os.time(), vim.uv.hrtime())
+local function canonical_value(value)
+    local value_type = type(value)
+
+    if value_type == 'nil' then
+        return 'nil'
+    end
+    if value_type == 'boolean' then
+        return value and 'boolean:true' or 'boolean:false'
+    end
+    if value_type == 'number' then
+        return string.format('number:%s', tostring(value))
+    end
+    if value_type == 'string' then
+        return string.format('string:%d:%s', #value, value)
+    end
+    if value_type ~= 'table' then
+        error(string.format('cannot persist snapshot value of type %s', value_type))
+    end
+
+    local entries = {}
+    for key, entry in pairs(value) do
+        entries[#entries + 1] = {
+            key = canonical_value(key),
+            value = canonical_value(entry),
+        }
+    end
+    table.sort(entries, function(left, right)
+        return left.key < right.key
+    end)
+
+    local parts = { 'table:{' }
+    for _, entry in ipairs(entries) do
+        parts[#parts + 1] = entry.key
+        parts[#parts + 1] = '='
+        parts[#parts + 1] = entry.value
+        parts[#parts + 1] = ';'
+    end
+    parts[#parts + 1] = '}'
+    return table.concat(parts)
+end
+
+---@param snapshot tabulature.SessionSnapshot
+---@return string
+local function snapshot_digest(snapshot)
+    return vim.fn.sha256(canonical_value(snapshot))
+end
+
+---@param index table
+---@param id string
+---@return table?
+local function find_snapshot(index, id)
+    for _, entry in ipairs(index.snapshots) do
+        if entry.id == id then
+            return entry
+        end
+    end
+    return nil
 end
 
 ---@param snapshot tabulature.SessionSnapshot
 ---@return table
 function M.save_snapshot(snapshot)
-    local id = allocate_snapshot_id()
+    local digest = snapshot_digest(snapshot)
+    local id = string.format('sha256:%s', digest)
     local now = os.time()
     local filename = snapshot_filename(id)
     local index = read_index()
+    local snapshot_path = vim.fs.joinpath(state_dir(), filename)
+    local stored = read_json(snapshot_path)
+    local index_changed = false
 
-    write_json(vim.fs.joinpath(state_dir(), filename), snapshot)
+    if stored == nil or snapshot_digest(stored) ~= digest then
+        write_json(snapshot_path, snapshot)
+    end
 
-    table.insert(index.snapshots, {
-        id = id,
-        created_at = now,
-        top_level_count = type(snapshot.children) == 'table' and #snapshot.children or 0,
-        file = filename,
-    })
-    index.latest_snapshot_id = id
-    write_json(state_file(), index)
+    if find_snapshot(index, id) == nil then
+        table.insert(index.snapshots, {
+            id = id,
+            created_at = now,
+            top_level_count = type(snapshot.children) == 'table' and #snapshot.children or 0,
+            file = filename,
+        })
+        index_changed = true
+    end
+    if index.latest_snapshot_id ~= id then
+        index.latest_snapshot_id = id
+        index_changed = true
+    end
+    if index_changed then
+        write_json(state_file(), index)
+    end
 
     return {
         version = 1,

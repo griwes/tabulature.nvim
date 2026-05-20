@@ -5,7 +5,65 @@ local function assert_equal(actual, expected)
     assert(actual == expected, ('expected %q, got %q'):format(tostring(expected), tostring(actual)))
 end
 
+local function close_other_tabpages()
+    local current = vim.api.nvim_get_current_tabpage()
+
+    for _, tabpage in ipairs(vim.api.nvim_list_tabpages()) do
+        if tabpage ~= current and vim.api.nvim_tabpage_is_valid(tabpage) then
+            pcall(vim.api.nvim_win_close, vim.api.nvim_tabpage_get_win(tabpage), true)
+        end
+    end
+
+    if vim.api.nvim_tabpage_is_valid(current) then
+        vim.api.nvim_set_current_tabpage(current)
+    end
+end
+
+local function open_tabpage()
+    return vim.api.nvim_open_tabpage(0, true, {})
+end
+
+local function open_file_tabpage(path)
+    return vim.api.nvim_open_tabpage(vim.fn.bufadd(path), true, {})
+end
+
+local function close_current_tabpage()
+    local tabpage = vim.api.nvim_get_current_tabpage()
+    if #vim.api.nvim_list_tabpages() > 1 and vim.api.nvim_tabpage_is_valid(tabpage) then
+        pcall(vim.api.nvim_win_close, vim.api.nvim_tabpage_get_win(tabpage), true)
+    end
+end
+
+local function tabpage_offset(offset)
+    local tabpages = vim.api.nvim_list_tabpages()
+    local current = vim.api.nvim_get_current_tabpage()
+
+    for index, tabpage in ipairs(tabpages) do
+        if tabpage == current then
+            local target = tabpages[((index - 1 + offset) % #tabpages) + 1]
+            vim.api.nvim_set_current_tabpage(target)
+            return target
+        end
+    end
+end
+
 describe('tabulature prototype state integration', function()
+    it('does not derive filename labels when adopting existing tabpages by default', function()
+        close_other_tabpages()
+        local path = vim.fs.joinpath(vim.uv.os_tmpdir(), ('tabulature-existing-%s.lua'):format(vim.uv.hrtime()))
+        local file = assert(vim.uv.fs_open(path, 'w', 420))
+        assert(vim.uv.fs_write(file, 'return true\n'))
+        assert(vim.uv.fs_close(file))
+
+        vim.cmd.edit({ args = { path } })
+        local filename = path:match('[^/\\]+$')
+        local adopted = state.adopt_existing_tabpages({ reset = true })
+        local tab = state.get_tab(adopted[1])
+
+        assert_equal(tab.auto_label, false)
+        assert(tab.name ~= filename, 'existing tabpage adopted a transient filename label')
+    end)
+
     it('adopts an existing physical tabpage when no snapshot tabs exist', function()
         require('tabulature.session').restore({
             kind = 'tabulature.restore_tabs',
@@ -74,20 +132,20 @@ describe('tabulature prototype state integration', function()
         assert_equal(model.find(tree, nested[2]).active, true)
     end)
 
-    it('does not redirect physical tabnext or tabprevious through nested switch targets', function()
+    it('does not redirect physical tabpage navigation through nested switch targets', function()
         local tabulature = require('tabulature')
         local top = tabulature.create_tab({ label = 'Nav Top' })
         local sub = tabulature.create_subtab({ label = 'Nav Sub' })
 
         vim.api.nvim_set_current_tabpage(state.tabpage_for(sub))
-        vim.cmd.tabprevious()
+        tabpage_offset(-1)
         assert_equal(vim.api.nvim_get_current_tabpage(), state.tabpage_for(top))
 
-        vim.cmd.tabnext()
+        tabpage_offset(1)
         assert_equal(vim.api.nvim_get_current_tabpage(), state.tabpage_for(sub))
     end)
 
-    it('adopts native tabedit tabpages created after Tabulature setup', function()
+    it('adopts API-opened file tabpages without deriving filename labels', function()
         local parent = require('tabulature').create_tab({ label = 'Adopt Parent' })
         local sibling = require('tabulature').create_subtab({ label = 'Adopt Sibling' })
         local path = vim.fs.joinpath(vim.uv.os_tmpdir(), ('tabulature-adopt-%s.lua'):format(vim.uv.hrtime()))
@@ -96,19 +154,19 @@ describe('tabulature prototype state integration', function()
         assert(vim.uv.fs_close(file))
 
         assert_equal(state.get_current_tab().id, sibling)
-        vim.cmd('tabedit ' .. vim.fn.fnameescape(path))
+        open_file_tabpage(path)
         local adopted = state.get_current_tab().id
 
         assert_equal(type(adopted), 'string')
         assert_equal(state.get_tab(adopted).parent, parent)
-        assert_equal(state.get_tab(adopted).name, path:match('[^/\\]+$'))
+        assert(state.get_tab(adopted).name ~= path:match('[^/\\]+$'), 'API-opened tabpage derived a filename label')
         assert_equal(state.tabpage_for(adopted), vim.api.nvim_get_current_tabpage())
 
         require('tabulature').adopt_current_tabpage({ parent_id = sibling })
         assert_equal(state.get_tab(adopted).parent, sibling)
     end)
 
-    it('does not label plain native tabnew from the source buffer filename', function()
+    it('does not label plain API-opened tabpages from the source buffer filename', function()
         local parent = require('tabulature').create_tab({ label = 'Source Parent' })
         require('tabulature').create_subtab({ label = 'Source Sibling' })
         local path = vim.fs.joinpath(vim.uv.os_tmpdir(), ('tabulature-source-%s.lua'):format(vim.uv.hrtime()))
@@ -119,21 +177,41 @@ describe('tabulature prototype state integration', function()
         vim.cmd('edit ' .. vim.fn.fnameescape(path))
         local source_label = path:match('[^/\\]+$')
 
-        vim.cmd('tabnew')
+        open_tabpage()
         local adopted = state.get_current_tab().id
 
         assert_equal(type(adopted), 'string')
         assert_equal(state.get_tab(adopted).parent, parent)
-        assert(state.get_tab(adopted).name ~= source_label, 'plain tabnew inherited source buffer label')
+        assert(state.get_tab(adopted).name ~= source_label, 'plain API-opened tabpage inherited source buffer label')
     end)
 
-    it('adopts native tabnew even when session capture runs before TabEnter', function()
+    it('does not auto-label API-opened tabpages after Continuity-style buffer rebinding', function()
+        local parent = require('tabulature').create_tab({ label = 'Rebind Parent' })
+        require('tabulature').create_subtab({ label = 'Rebind Sibling' })
+        local path = vim.fs.joinpath(vim.uv.os_tmpdir(), ('tabulature-rebind-%s.lua'):format(vim.uv.hrtime()))
+        local file = assert(vim.uv.fs_open(path, 'w', 420))
+        assert(vim.uv.fs_write(file, 'return true\n'))
+        assert(vim.uv.fs_close(file))
+
+        open_tabpage()
+        local adopted = state.get_current_tab().id
+        local original_label = state.get_tab(adopted).name
+
+        vim.cmd.edit({ args = { path } })
+
+        assert_equal(type(adopted), 'string')
+        assert_equal(state.get_tab(adopted).parent, parent)
+        assert_equal(state.get_tab(adopted).auto_label, false)
+        assert_equal(state.get_tab(adopted).name, original_label)
+    end)
+
+    it('adopts API-opened tabpages even when session capture runs before TabEnter', function()
         local parent = require('tabulature').create_tab({ label = 'Race Parent' })
         local sibling = require('tabulature').create_subtab({ label = 'Race Sibling' })
         local eventignore = vim.o.eventignore
 
         vim.o.eventignore = 'TabEnter'
-        vim.cmd('tabnew')
+        open_tabpage()
         local native_tabpage = vim.api.nvim_get_current_tabpage()
         vim.o.eventignore = eventignore
 
@@ -183,11 +261,13 @@ describe('tabulature prototype state integration', function()
         assert_equal(vim.api.nvim_get_current_tabpage(), state.tabpage_for(one_leaf))
     end)
 
-    it('dispatches Statuesque-rendered local tab clicks and close buttons', function()
+    it('closes multi-window tabs through Statuesque-rendered close buttons', function()
         local tabulature = require('tabulature')
         local clicks = require('statuesque.clicks')
         local target = tabulature.create_tab({ label = 'Clickable Tab' })
         local target_tabpage = state.tabpage_for(target)
+        vim.cmd.vsplit()
+        assert_equal(#vim.api.nvim_tabpage_list_wins(target_tabpage), 2)
         local origin = vim.api.nvim_list_tabpages()[1]
         vim.api.nvim_set_current_tabpage(origin)
 
@@ -244,7 +324,7 @@ describe('tabulature prototype state integration', function()
 
         vim.o.eventignore = 'TabClosed'
         vim.api.nvim_set_current_tabpage(stale_tabpage)
-        vim.cmd('silent! tabclose!')
+        close_current_tabpage()
         vim.o.eventignore = eventignore
 
         local captured = require('tabulature.session').capture()

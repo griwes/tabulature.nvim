@@ -1,6 +1,7 @@
 local model = require('tabulature.model')
 local session = require('tabulature.session')
 local state = require('tabulature.state')
+local tabpage = require('tabulature.compat.tabpage')
 
 local function assert_equal(actual, expected)
     assert(actual == expected, ('expected %q, got %q'):format(tostring(expected), tostring(actual)))
@@ -11,7 +12,7 @@ local function read_json(path)
 end
 
 local function open_tabpage()
-    return vim.api.nvim_open_tabpage(0, true, {})
+    return tabpage.open()
 end
 
 local function count_files(path)

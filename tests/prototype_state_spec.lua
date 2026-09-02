@@ -1,5 +1,6 @@
 local state = require('tabulature.state')
 local model = require('tabulature.model')
+local tabpage = require('tabulature.compat.tabpage')
 
 local function assert_equal(actual, expected)
     assert(actual == expected, ('expected %q, got %q'):format(tostring(expected), tostring(actual)))
@@ -20,11 +21,11 @@ local function close_other_tabpages()
 end
 
 local function open_tabpage()
-    return vim.api.nvim_open_tabpage(0, true, {})
+    return tabpage.open()
 end
 
 local function open_file_tabpage(path)
-    return vim.api.nvim_open_tabpage(vim.fn.bufadd(path), true, {})
+    return tabpage.open(vim.fn.bufadd(path))
 end
 
 local function close_current_tabpage()

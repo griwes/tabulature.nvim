@@ -1,4 +1,5 @@
 local model = require('tabulature.model')
+local tabpage = require('tabulature.compat.tabpage')
 
 local M = {}
 
@@ -65,7 +66,7 @@ end
 ---@param bufnr? integer
 ---@return integer
 local function open_tabpage(bufnr)
-    return vim.api.nvim_open_tabpage(bufnr or 0, true, {})
+    return tabpage.open(bufnr)
 end
 
 ---@param tabpage integer
